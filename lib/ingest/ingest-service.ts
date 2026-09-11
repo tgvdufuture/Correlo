@@ -6,6 +6,7 @@ import type { FragmentsRepo } from "@/lib/repositories/fragments";
 import { idempotencyKey, type JobRow, type JobsRepo } from "@/lib/repositories/jobs";
 import { CHUNKER_VERSION, chunkText, buildLocator, type PageMapEntry, type HeadingMapEntry } from "@/lib/ingest/chunker";
 import { extractUrlText } from "@/lib/ingest/parsers";
+import { countReplacementChars } from "@/lib/ingest/decoding";
 import type { EmbeddingService } from "@/lib/ingest/embedding-service";
 import { SUMMARY_PROMPT_VERSION } from "@/lib/ingest/summary-service";
 
@@ -86,6 +87,14 @@ export class IngestService {
       headings = extraction.headings;
     }
 
+    // garde-fou : un texte ingéré corrompu (U+FFFD) doit être visible, pas silencieux
+    const replacementChars = countReplacementChars(rawContent);
+    if (replacementChars > 0) {
+      console.warn(
+        `[ingest] source ${source.id} : ${replacementChars} caractère(s) de remplacement (U+FFFD) — encodage source suspect`
+      );
+    }
+
     const chunks = chunkText(rawContent);
     const total = chunks.length;
 
@@ -126,7 +135,7 @@ export class IngestService {
           job.id,
           job.lease_token as string,
           JSON.stringify({ next_chunk_index: next }),
-          JSON.stringify({ processed: next, total })
+          JSON.stringify({ processed: next, total, replacement_chars: replacementChars })
         );
         this.deps.jobs.renewLease(job.id, job.lease_token as string);
         return written;

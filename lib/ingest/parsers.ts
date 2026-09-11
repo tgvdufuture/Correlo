@@ -2,6 +2,8 @@ import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { PDFParse } from "pdf-parse";
 import { normalizeText } from "@/lib/ingest/normalizer";
+import { countReplacementChars, decodeHtmlPage, decodeTextBytes } from "@/lib/ingest/decoding";
+import { stripGutenbergBoilerplate } from "@/lib/ingest/boilerplate";
 
 /** PDF sans texte extractible. */
 export class PdfNoTextError extends Error {
@@ -26,11 +28,22 @@ export interface PdfPage {
   text: string;
 }
 
-/** Texte brut d'un fichier texte (UTF-8, BOM toléré). */
+/**
+ * Texte brut d'un fichier texte : décodage explicite (UTF-8 strict, repli
+ * windows-1252) — un fichier latin-1 ne produit plus de U+FFFD, BOM toléré.
+ */
 export function parseTextBuffer(buf: Buffer): string {
-  let s = buf.toString("utf8");
-  if (s.charCodeAt(0) === 0xfeff) s = s.slice(1);
-  return s;
+  const { text } = decodeTextBytes(new Uint8Array(buf), null);
+  const decoded = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  // Un .txt issu de Project Gutenberg porte le même boilerplate qu'une page URL :
+  // licence et en-tête/pied ne doivent pas devenir du contenu indexé.
+  const cleaned = stripGutenbergBoilerplate(decoded);
+  if (cleaned.stripped) {
+    console.info(
+      `[ingest] boilerplate Gutenberg retiré (${cleaned.reason}) : ${cleaned.removedChars} caractères`
+    );
+  }
+  return cleaned.text;
 }
 
 /** Extraction des pages d'un PDF (pdf-parse). */
@@ -74,7 +87,22 @@ export async function extractUrlText(
     if (!res.ok) {
       throw new UrlExtractionError("fetch_failed", `HTTP ${res.status} pour ${url}`);
     }
-    html = await res.text();
+    // Les octets sont décodés explicitement (charset déclaré, puis UTF-8 strict,
+    // puis windows-1252) : `res.text()` produisait des U+FFFD silencieux sur les
+    // pages servies en latin-1 sans charset (constat : 429 fragments corrompus).
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.byteLength > maxBytes) {
+      throw new UrlExtractionError("fetch_failed", `Page > ${maxBytes} octets`);
+    }
+    const decoded = decodeHtmlPage(bytes, res.headers.get("content-type"));
+    html = decoded.text;
+    if (decoded.fallback) {
+      console.warn(`[ingest] décodage ${decoded.charset} (charset non déclaré) pour ${url}`);
+    }
+    const replacements = countReplacementChars(html);
+    if (replacements > 0) {
+      console.warn(`[ingest] ${replacements} caractère(s) de remplacement dans ${url}`);
+    }
   } catch (e) {
     if (e instanceof UrlExtractionError) throw e;
     throw new UrlExtractionError(
@@ -83,9 +111,6 @@ export async function extractUrlText(
     );
   } finally {
     clearTimeout(timer);
-  }
-  if (html.length > maxBytes) {
-    throw new UrlExtractionError("fetch_failed", `Page > ${maxBytes} octets`);
   }
 
   const dom = new JSDOM(html, { url });
@@ -117,6 +142,21 @@ export async function extractUrlText(
     if (!title) {
       title = dom.window.document.querySelector("h1")?.textContent?.trim() || null;
     }
+  }
+
+  // Retrait du boilerplate Gutenberg (licence, en-tête/pied) : sans lui, la licence
+  // devient du contenu indexé — deux thèmes de la Phase 5A en étaient entièrement faits.
+  const cleaned = stripGutenbergBoilerplate(text);
+  if (cleaned.stripped) {
+    console.info(
+      `[ingest] boilerplate Gutenberg retiré (${cleaned.reason}) : ${cleaned.removedChars} caractères`
+    );
+    text = cleaned.text;
+    // les offsets des en-têtes sont recalés sur le texte nettoyé : les locators
+    // `#titre;[start,end)` sont calculés sur ce texte, pas sur l'original
+    headings = headings
+      .map((h) => ({ ...h, offset: h.offset - cleaned.removedPrefix }))
+      .filter((h) => h.offset >= 0 && h.offset < text.length);
   }
 
   if (text.length < 100) {

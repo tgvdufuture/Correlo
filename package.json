@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "validate:corpus": "node scripts/validate-phase-1b.mjs",
     "discover": "node scripts/discover.mjs",
-    "eval:phase2a": "node scripts/evaluate-phase-2a.mjs"
+    "eval:phase2a": "node scripts/evaluate-phase-2a.mjs",
+    "reingest": "node scripts/reingest.mjs"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
