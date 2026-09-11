@@ -32,6 +32,12 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+
+# données locales (sources, base SQLite, rapports d'évaluation)
+/data/*
+# exception : le manifeste de validation est un artefact de protocole (12 docs / 5 domaines)
+!/data/corpus_manifest.json
 
 # vercel
 .vercel

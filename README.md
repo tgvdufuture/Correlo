@@ -1,36 +1,93 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Sérendipité — moteur de connexions personnel
 
-## Getting Started
+Application web locale (Next.js) où vous déposez des sources (texte, PDF, URL).
+Le système les découpe en fragments (~2 000 caractères), les indexe via des
+embeddings **locaux** (Ollama), puis découvrira des connexions non évidentes
+entre fragments (analogie, contradiction, cause).
 
-First, run the development server:
+**Positionnement : local-first.** Les embeddings sont toujours calculés en local
+(Ollama). Le chat ne part vers Groq que si vous gardez la configuration par défaut
+(`LLM_CHAT_PROVIDER=groq`) ; basculez sur `ollama` pour rester 100 % hors ligne.
+
+> État actuel : **Phase 1A** (ingestion TEXT/PDF/URL, chunker-v1, embeddings
+> Ollama, file de jobs asynchrone avec reprise, bibliothèque). Les phases
+> découverte/feed/canvas (1B–4) ne sont pas implémentées.
+
+## Prérequis
+
+- Node.js ≥ 20 (testé sur Node 24)
+- [Ollama](https://ollama.com) installé et lancé, avec le modèle d'embedding :
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+ollama pull nomic-embed-text
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Pour le chat local (optionnel) :
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+ollama pull llama3.3
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Installation
 
-## Learn More
+```bash
+npm install
+cp .env.example .env.local   # puis ajuster
+npm run dev                  # http://localhost:3000/sources
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Variables d'environnement (`.env.local`)
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+| Variable | Défaut | Description |
+|---|---|---|
+| `DATABASE_PATH` | `./data/serendipity.db` | Base SQLite locale |
+| `LLM_CHAT_PROVIDER` | `groq` | `groq` ou `ollama` — aucun fallback automatique |
+| `GROQ_API_KEY` | — | Requise uniquement si `LLM_CHAT_PROVIDER=groq` |
+| `GROQ_CHAT_MODEL` | `qwen/qwen3.8-27b` | Modèle de chat Groq (le défaut historique `llama-3.3-70b-versatile` n'existe plus chez Groq) |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Serveur Ollama local |
+| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Modèle d'embeddings (toujours local, 768 dims) |
+| `OLLAMA_CHAT_MODEL` | — | Requis uniquement si `LLM_CHAT_PROVIDER=ollama` |
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Sans `GROQ_API_KEY` : l'ingestion et les embeddings fonctionnent ; le résumé de
+source passe en `failed` avec `missing_groq_api_key` (visible dans la
+bibliothèque, relance manuelle après configuration).
 
-## Deploy on Vercel
+## Validation (Phase 1A)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+npm run typecheck   # tsc --noEmit
+npm test            # vitest : chunker, codec embeddings, ingestion, crash/reprise, lease, offsets UTF-16
+npm run build
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Scénario manuel :
+
+1. `ollama serve` lancé, `ollama pull nomic-embed-text`.
+2. `npm run dev`, ouvrir `/sources`.
+3. Importer un fichier `.txt`/`.md`, un PDF textuel, et une URL.
+4. Vérifier dans la bibliothèque : ingestion `terminé`, fragments > 0,
+   résumé `terminé` (ou `échec` avec `missing_groq_api_key` sans clé).
+5. Redémarrer pendant une ingestion : le job reprend au checkpoint, aucun doublon.
+
+## Architecture
+
+- **Base** : SQLite via `better-sqlite3` (WAL, `foreign_keys = ON`), schéma
+  verrouillé `migrations/001_v1_2.sql` (PRD §3.3).
+- **LLM** : confiné dans `lib/llm/` — `LlmProvider` (chat configurable +
+  embeddings Ollama), `GroqProvider`, `OllamaChatProvider`, `OllamaProvider`,
+  `HybridProvider`, codec Float32 LE L2-normalisé.
+- **Ingestion** : `lib/ingest/` — normalisation Q17, chunker-v1
+  (2 000 ± 300, min 800 / max 2 400, overlap 300, locators UTF-16), parsers
+  (texte / `pdf-parse` / fetch + Readability).
+- **Jobs** : table `jobs` (lease + token + checkpoint + idempotency), worker
+  concurrence 1–2, recovery au boot des leases expirés uniquement, backoff +
+  jitter, max 5 attempts.
+- **UI** : `app/sources` — import drag & drop + URL, bibliothèque avec statuts,
+  polling léger (3 s), relance manuelle des jobs en échec.
+
+## Local-first
+
+- Aucune donnée ne quitte la machine, sauf les appels chat au provider configuré
+  (`groq` par défaut, `ollama` sinon).
+- Les fichiers d'origine sont copiés dans `data/sources/` (gitignoré).
+- Le résumé de source est un routage non citable : seuls les fragments sont citables.
