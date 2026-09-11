@@ -1,4 +1,5 @@
 import { sha256Hex } from "@/lib/hash";
+import { dotProduct, kMeansVectors, mulberry32 } from "@/lib/cluster/kmeans";
 
 /**
  * Sampling de candidats Q20 (PRD §3.5 / Phase 2A) :
@@ -7,7 +8,11 @@ import { sha256Hex } from "@/lib/hash";
  *  - diversified : top-3 cosine + 2 fragments de clusters distincts + 1 lointain ;
  *  - top6 : les 6 plus proches (baseline « top-6 cosine pur », même budget) ;
  *  - quotas : ≤ 20 paires émises par source, ≤ 200 paires par run.
+ *
+ * Le PRNG et le k-means vivent dans lib/cluster/kmeans.ts (partagés avec les thèmes
+ * de la Phase 5A) ; mulberry32 reste ré-exporté ici, son comportement étant contractuel.
  */
+export { mulberry32 };
 
 export interface DiscoveryFragment {
   id: string;
@@ -41,18 +46,6 @@ export function makeSeed(corpusHash: string, runId: string): string {
   return sha256Hex(`${corpusHash}|${runId}`);
 }
 
-/** PRNG déterministe (mulberry32) — mêmes tirages pour un même seed. */
-export function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
 /**
  * Échantillonne les paires de candidats (déterministe pour un seed donné).
  * L'ordre d'itération est (source_id, chunk_index) ; on s'arrête dès que le
@@ -71,7 +64,14 @@ export function samplePairs(opts: SampleOptions): PairCandidate[] {
   if (ordered.length < 2) return [];
 
   const dims = ordered[0].embedding.length;
-  const clusters = opts.sampler === "diversified" ? kMeans(ordered, rng, opts.clusterCount ?? 8) : null;
+  const clusters =
+    opts.sampler === "diversified"
+      ? kMeansVectors(
+          ordered.map((f) => f.embedding),
+          opts.clusterCount ?? 8,
+          rng
+        ).assignment
+      : null;
 
   const emitted = new Set<string>();
   const perSource = new Map<string, number>();
@@ -121,8 +121,7 @@ function collectCandidates(
   for (let j = 0; j < ordered.length; j++) {
     const b = ordered[j];
     if (b.sourceId === a.sourceId) continue;
-    let s = 0;
-    for (let i = 0; i < dims; i++) s += a.embedding[i] * b.embedding[i];
+    const s = dotProduct(a.embedding, b.embedding, dims);
     const cand: Candidate = { id: b.id, sourceId: b.sourceId, cosine: s };
 
     if (top.length < topK) {
@@ -151,7 +150,7 @@ function collectCandidates(
       const members = ordered.filter((f, idx) => clusters[idx] === ci && f.sourceId !== a.sourceId);
       const pick = pickCrossSource(members, a.sourceId, rng);
       if (pick) {
-        const cosine = dot(a.embedding, pick.embedding, dims);
+        const cosine = dotProduct(a.embedding, pick.embedding, dims);
         out.push({ id: pick.id, sourceId: pick.sourceId, cosine });
       }
     }
@@ -175,72 +174,4 @@ function pickCrossSource(
     if (pick.sourceId !== sourceId) return pick;
   }
   return members.find((m) => m.sourceId !== sourceId) ?? null;
-}
-
-function dot(a: Float32Array, b: Float32Array, dims: number): number {
-  let s = 0;
-  for (let i = 0; i < dims; i++) s += a[i] * b[i];
-  return s;
-}
-
-/**
- * k-means (k-means++ léger, itérations déterministes) sur les embeddings.
- * Retourne l'assignation cluster de chaque fragment (index parallèle à `frags`).
- */
-function kMeans(frags: DiscoveryFragment[], rng: () => number, k: number): number[] {
-  const n = frags.length;
-  const dims = frags[0].embedding.length;
-  const kk = Math.max(2, Math.min(k, n));
-  const assignment = new Array<number>(n);
-
-  // k-means++ : premier centroïde au hasard, suivants = les plus éloignés
-  const centroids: Float32Array[] = [new Float32Array(frags[Math.floor(rng() * n)].embedding)];
-  while (centroids.length < kk) {
-    let bestIdx = -1;
-    let bestDist = -1;
-    for (let i = 0; i < n; i++) {
-      let minDist = Infinity;
-      for (const c of centroids) {
-        const d = 1 - dot(frags[i].embedding, c, dims);
-        if (d < minDist) minDist = d;
-      }
-      if (minDist > bestDist) {
-        bestDist = minDist;
-        bestIdx = i;
-      }
-    }
-    centroids.push(new Float32Array(frags[bestIdx].embedding));
-  }
-
-  for (let iter = 0; iter < 4; iter++) {
-    for (let i = 0; i < n; i++) {
-      let best = 0;
-      let bestScore = -Infinity;
-      for (let c = 0; c < kk; c++) {
-        const s = dot(frags[i].embedding, centroids[c], dims);
-        if (s > bestScore) {
-          bestScore = s;
-          best = c;
-        }
-      }
-      assignment[i] = best;
-    }
-    // recalcule des centroïdes (moyenne par cluster, renormalisée)
-    const sums = centroids.map(() => new Float64Array(dims));
-    const counts = new Array<number>(kk).fill(0);
-    for (let i = 0; i < n; i++) {
-      const s = sums[assignment[i]];
-      for (let d = 0; d < dims; d++) s[d] += frags[i].embedding[d];
-      counts[assignment[i]] += 1;
-    }
-    for (let c = 0; c < kk; c++) {
-      const s = sums[c];
-      let norm = 0;
-      for (let d = 0; d < dims; d++) norm += s[d] * s[d];
-      norm = Math.sqrt(norm) || 1;
-      const cvec = centroids[c];
-      for (let d = 0; d < dims; d++) cvec[d] = s[d] / norm;
-    }
-  }
-  return assignment;
 }

@@ -122,9 +122,13 @@ Ce qui **ne change pas** : la §3.2 *DO NOT CHANGE* dans son intégralité (sch�
 | run_id, corpus_hash, seed | TEXT | reproductibilité (§2.1) |
 | label | TEXT | libellé TF-IDF du cluster (sans LLM) |
 | centroid | BLOB | Float32 LE, L2-normalisé, même format que les fragments |
+| centroid_dimensions | INTEGER | 768 en production — nécessaire pour relire le BLOB avec le codec contrôlé |
 | size | INTEGER | nombre de fragments du cluster |
-| sampler_version, prompt_version, chat_model | TEXT | traçabilité du run |
+| sampler_version | TEXT | version de l'algorithme de thèmes (`themes-v1`) |
 | created_at | timestamp | |
+
+> Pas de `prompt_version` / `chat_model` sur un thème : le clustering et les libellés
+> sont **entièrement locaux** (k-means + TF-IDF), aucun LLM n'intervient à ce niveau.
 
 `syntheses`
 
@@ -134,12 +138,12 @@ Ce qui **ne change pas** : la §3.2 *DO NOT CHANGE* dans son intégralité (sch�
 | text | TEXT NOT NULL | l'énoncé de synthèse (≤ 60 mots) |
 | theme_id | FK themes ON DELETE CASCADE | |
 | relation_kind | TEXT | `combination` \| `extension` \| `tension` \| `application` |
-| epistemic_status | TEXT NOT NULL | jamais FACT : INFERENCE, ou HYPOTHESIS si < 3 sources ou preuve non vérifiée |
+| epistemic_status | TEXT NOT NULL | contrainte `CHECK (IN ('INFERENCE','HYPOTHESIS','SPECULATION'))` : un FACT est **refusé par la base**, pas seulement déconseillé |
 | parent_source_ids, evidence_fragment_ids | JSON (uuid[]) | ≥ 2 sources distinctes ; validation applicative obligatoire (pas de vraie FK) |
 | provenance_snapshot | JSON | source, hash, locator, texte au moment de la création |
 | content_sig | TEXT NOT NULL UNIQUE | SHA256(texte canonicalisé) — dédup des reformulations |
 | confidence | TEXT | `low` \| `medium` \| `high` (proposé par le modèle, jamais élevé automatiquement) |
-| state | TEXT | `proposed` \| `accepted` \| `rejected` \| `stale` |
+| state | TEXT | `proposed` \| `accepted` \| `rejected` (la péremption est portée par `stale`, pas par l'état) |
 | stale | INTEGER DEFAULT 0 | source supprimée / ré-ingérée |
 | prompt_version, chat_model | TEXT NOT NULL | |
 | created_at | timestamp | |
