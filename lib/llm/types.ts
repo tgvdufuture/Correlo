@@ -23,3 +23,17 @@ export interface LlmProvider {
 export interface EmbedBatcher {
   embedMany(texts: string[]): Promise<number[][]>;
 }
+
+/**
+ * Cache par hash de prompt (modèle | version de prompt | messages).
+ *
+ * Interface minimale — et non `Map` — pour que l'implémentation puisse être
+ * **persistante** (`lib/repositories/llm-cache.ts`) : c'est ce qui rend un rejeu
+ * de run reproductible, donc ce qui permet à la dédup `content_sig` de faire son
+ * travail (le modèle ne reformule plus la même question). Une `Map` en mémoire
+ * satisfait cette interface : les tests peuvent l'utiliser telle quelle.
+ */
+export interface PromptCache {
+  get(key: string): unknown | undefined;
+  set(key: string, value: unknown): void;
+}

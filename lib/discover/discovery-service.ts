@@ -2,7 +2,7 @@ import type { z } from "zod";
 import type { Db } from "@/lib/db/client";
 import { sha256Hex } from "@/lib/hash";
 import { decodeEmbedding } from "@/lib/llm/embedding-codec";
-import type { LlmProvider } from "@/lib/llm/types";
+import type { LlmProvider, PromptCache } from "@/lib/llm/types";
 import { DISCOVERY_PROMPT_VERSION, buildDiscoveryPrompt } from "@/lib/discover/prompts";
 import { makeDiscoveryBatchSchema, attachResults, type AttachedResult } from "@/lib/discover/parser";
 import {
@@ -40,7 +40,7 @@ export interface DiscoveryRunOptions {
   /** Pause entre deux batchs (fenêtre ITPM du provider, ex. 65 s sur Groq free). */
   interBatchDelayMs?: number;
   /** Cache par hash de prompt (modèle + prompt_version + contenu) — évite de re-payer un batch identique. */
-  promptCache?: Map<string, unknown>;
+  promptCache?: PromptCache;
   /** Progression cumulée (reprise incluse) — persistée par le worker pour survivre à une coupure. */
   onProgress?: (info: {
     processed: number;
@@ -107,7 +107,20 @@ interface CorpusFragment {
  */
 export class DiscoveryService {
   constructor(
-    private deps: { db: Db; suggestions: SuggestionsRepo; chat: LlmProvider; chatModel: string }
+    private deps: {
+      db: Db;
+      suggestions: SuggestionsRepo;
+      chat: LlmProvider;
+      chatModel: string;
+      /**
+       * Signature du **réglage** du chat (modèle + effort de raisonnement + budget).
+       * Entre dans la clé de cache : un même prompt n'a pas la même réponse selon
+       * que le modèle raisonne ou non (mesuré : 10 skips → 10 synthèses).
+       */
+      chatSignature?: string;
+      /** Cache persisté (worker) ou en mémoire (tests). Surchargeable par run. */
+      promptCache?: PromptCache;
+    }
   ) {}
 
   async run(sourceIds: string[], opts: DiscoveryRunOptions): Promise<DiscoveryRunResult> {
@@ -320,9 +333,14 @@ export class DiscoveryService {
 
     // cache par hash de prompt (PRD §3.4 : modèle + prompt_version + contenu inclus)
     const cacheKey = sha256Hex(
-      JSON.stringify([this.deps.chatModel, DISCOVERY_PROMPT_VERSION, messages])
+      JSON.stringify([
+        this.deps.chatSignature ?? this.deps.chatModel,
+        DISCOVERY_PROMPT_VERSION,
+        messages,
+      ])
     );
-    const cached = opts.promptCache?.get(cacheKey);
+    const promptCache = opts.promptCache ?? this.deps.promptCache;
+    const cached = promptCache?.get(cacheKey);
     if (cached !== undefined) {
       const parsed = cached as z.infer<ReturnType<typeof makeDiscoveryBatchSchema>>;
       return { attached: attachResults(parsed), batchCalls: 0, fromCache: 1 };
@@ -354,7 +372,7 @@ export class DiscoveryService {
       }
     }
     if (!parsed) throw new Error("batch sans résultat après tentatives");
-    opts.promptCache?.set(cacheKey, parsed);
+    promptCache?.set(cacheKey, parsed);
     return { attached: attachResults(parsed), batchCalls: 1, fromCache: 0 };
   }
 }

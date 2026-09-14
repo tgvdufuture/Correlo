@@ -20,6 +20,17 @@ const envSchema = z
      */
     GROQ_MAX_TOKENS: z.coerce.number().int().positive().optional(),
     /**
+     * Effort de raisonnement demandé au modèle (Groq : `reasoning_effort`).
+     *
+     * Indispensable pour un modèle de raisonnement : sans ce champ, `qwen/qwen3.8-27b`
+     * répond en **6 tokens** et renvoie le JSON le plus court possible ({skip:true})
+     * sans jamais lire les preuves — mesuré sur le corpus réel (10 thèmes → 10 skips).
+     * Avec `low`, la même requête produit ~1 000 tokens de raisonnement.
+     * Absent = comportement du serveur (aucun champ envoyé) ; les endpoints qui ne
+     * connaissent pas le paramètre ne le reçoivent donc jamais.
+     */
+    GROQ_REASONING_EFFORT: z.enum(["low", "medium", "high"]).optional(),
+    /**
      * Timeout d'un échange chat (secondes). Un modèle qui raisonne avant de
      * répondre dépasse facilement 120 s : un timeout trop court tue le batch et
      * consomme les attempts du job (observé : 5 timeouts → job failed).

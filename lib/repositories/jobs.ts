@@ -3,7 +3,9 @@ import type { Db } from "@/lib/db/client";
 import { nowIso } from "@/lib/db/client";
 import { sha256Hex } from "@/lib/hash";
 
-export type JobKind = "ingest" | "summary" | "discover" | "investigation";
+// `synthesize` ajouté par la migration 003 (Phase 5A, amendement v1.3).
+// `investigation` reste réservé à la Phase 4 du PRD v1.2.
+export type JobKind = "ingest" | "summary" | "discover" | "investigation" | "synthesize";
 export type JobStatus = "pending" | "running" | "done" | "failed";
 
 export interface JobRow {

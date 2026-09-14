@@ -1,7 +1,14 @@
 import type { z } from "zod";
 import type { ChatMessage, LlmProvider } from "@/lib/llm/types";
 import { chatWithJsonCorrection } from "@/lib/llm/chat";
-import { LlmAuthError, LlmError, LlmNetworkError, LlmOutputError, LlmRateLimitError } from "@/lib/llm/errors";
+import {
+  LlmAuthError,
+  LlmError,
+  LlmJsonModeError,
+  LlmNetworkError,
+  LlmOutputError,
+  LlmRateLimitError,
+} from "@/lib/llm/errors";
 
 /** Endpoint par défaut : API Groq (OpenAI-compatible). */
 export const DEFAULT_CHAT_BASE_URL = "https://api.groq.com/openai/v1";
@@ -25,6 +32,13 @@ export class GroqProvider implements LlmProvider {
       apiKey?: string;
       model: string;
       maxTokens?: number;
+      /**
+       * Effort de raisonnement (Groq/OpenAI : `reasoning_effort`). Absent ⇒ aucun
+       * champ envoyé. Un modèle de raisonnement à qui on ne le demande pas ne
+       * raisonne pas : il renvoie la sortie la plus courte possible (mesuré : 6
+       * tokens, JSON `{skip:true}` sans lecture des preuves).
+       */
+      reasoningEffort?: "low" | "medium" | "high";
       baseUrl?: string;
       label?: string;
       timeoutMs?: number;
@@ -36,7 +50,11 @@ export class GroqProvider implements LlmProvider {
   }
 
   async chat<T extends z.ZodType>(messages: ChatMessage[], schema: T): Promise<z.infer<T>> {
-    const request = async (msgs: ChatMessage[], maxTokens?: number): Promise<Completion> => {
+    const request = async (
+      msgs: ChatMessage[],
+      maxTokens?: number,
+      jsonMode = true
+    ): Promise<Completion> => {
       // un seul signal couvre fetch + lecture du corps (res.json()) :
       // un LLM muet ne doit jamais laisser un job running à vie
       const ctrl = new AbortController();
@@ -55,7 +73,9 @@ export class GroqProvider implements LlmProvider {
             model: this.opts.model,
             messages: msgs,
             temperature: 0,
-            response_format: { type: "json_object" },
+            // repli sans mode JSON : le texte est alors nettoyé par chatWithJsonCorrection
+            ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
+            ...(this.opts.reasoningEffort ? { reasoning_effort: this.opts.reasoningEffort } : {}),
             // borne la réservation TPM du free tier et accélère nettement la réponse
             ...(maxTokens ? { max_tokens: maxTokens } : {}),
           }),
@@ -74,8 +94,16 @@ export class GroqProvider implements LlmProvider {
           throw new LlmRateLimitError(Number.isFinite(seconds) && seconds > 0 ? seconds : 60);
         }
         if (!res.ok) {
+          const body = await res.text();
           // modèle + endpoint dans l'erreur : un 404 vient presque toujours d'un id de modèle inconnu
-          const detail = (await res.text()).replace(/\s+/g, " ").slice(0, 200);
+          const detail = body.replace(/\s+/g, " ").slice(0, 200);
+          // mode JSON refusé par le provider (génération vide) : erreur distincte, pour que
+          // l'appelant rejoue SANS `response_format` au lieu de brûler les attempts du job
+          if (jsonMode && /json_validate_failed|failed_generation/.test(body)) {
+            throw new LlmJsonModeError(
+              `${this.label} a refusé la génération JSON [modèle « ${this.opts.model} »] : ${detail}`
+            );
+          }
           throw new LlmNetworkError(
             `${this.label} HTTP ${res.status} [modèle « ${this.opts.model} » sur ${this.baseUrl}] : ${detail}`
           );
@@ -105,8 +133,9 @@ export class GroqProvider implements LlmProvider {
         truncated: data.choices?.[0]?.finish_reason === "length",
       };
     };
-    const call = async (msgs: ChatMessage[]): Promise<string> => {
-      const first = await request(msgs, this.opts.maxTokens);
+    /** Un essai complet : budget nominal, puis budget doublé si la sortie est tronquée. */
+    const attempt = async (msgs: ChatMessage[], jsonMode: boolean): Promise<string> => {
+      const first = await request(msgs, this.opts.maxTokens, jsonMode);
       // `finish_reason: length` = sortie coupée par le budget : un modèle qui raisonne
       // consomme ses tokens avant d'écrire le JSON. On rejoue une fois avec un budget
       // doublé (borné) plutôt que de perdre le batch ; si c'est encore tronqué, le
@@ -114,11 +143,24 @@ export class GroqProvider implements LlmProvider {
       if (first.truncated && this.opts.maxTokens) {
         const bigger = Math.min(this.opts.maxTokens * 2, MAX_TOKENS_CEILING);
         if (bigger > this.opts.maxTokens) {
-          const retry = await request(msgs, bigger);
+          const retry = await request(msgs, bigger, jsonMode);
           if (!retry.truncated) return retry.content;
         }
       }
       return first.content;
+    };
+
+    const call = async (msgs: ChatMessage[]): Promise<string> => {
+      try {
+        return await attempt(msgs, true);
+      } catch (e) {
+        if (!(e instanceof LlmJsonModeError)) throw e;
+        // Le mode JSON a été refusé (génération vide) : on rejoue SANS `response_format`.
+        // Le prompt exige déjà du JSON ; `chatWithJsonCorrection` sait extraire un objet
+        // noyé dans de la prose et corrige une sortie invalide. Sans ce repli, un prompt
+        // déterministe en échec faisait tomber tout le run (5 attempts consommés).
+        return await attempt(msgs, false);
+      }
     };
     return chatWithJsonCorrection({ call, messages, schema });
   }

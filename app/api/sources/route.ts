@@ -9,6 +9,7 @@ import { createJobsRepo, idempotencyKey } from "@/lib/repositories/jobs";
 import { CHUNKER_VERSION } from "@/lib/ingest/chunker";
 import { normalizeText } from "@/lib/ingest/normalizer";
 import { extractPdfPages, parseTextBuffer } from "@/lib/ingest/parsers";
+import { sanitizeSourceTitle } from "@/lib/ingest/title";
 
 /**
  * POST /api/sources — import TEXT/PDF (multipart) ou URL (JSON).
@@ -33,13 +34,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ code: "invalid_payload", message: "fichier manquant ou vide" }, { status: 400 });
     }
     const buf = Buffer.from(await file.arrayBuffer());
-    const title = (typeof form.get("title") === "string" ? (form.get("title") as string).trim() : "") || file.name;
+    const rawTitle =
+      (typeof form.get("title") === "string" ? (form.get("title") as string).trim() : "") ||
+      file.name;
 
     if (type === "TEXT") {
       const rawContent = normalizeText(parseTextBuffer(buf));
       if (!rawContent.trim()) {
         return NextResponse.json({ code: "empty_extraction", message: "Fichier texte vide" }, { status: 400 });
       }
+      const title = checkedTitle(rawTitle, rawContent);
       const contentHash = sha256Hex(rawContent);
       if (sources.getByContentHash(contentHash)) {
         return NextResponse.json({ code: "duplicate_content", message: "Contenu déjà présent" }, { status: 409 });
@@ -84,6 +88,7 @@ export async function POST(req: NextRequest) {
       fs.rmSync(pdfPath, { force: true });
       return NextResponse.json({ code: "pdf_no_text", message: "texte non extractible" }, { status: 422 });
     }
+    const title = checkedTitle(rawTitle, rawContent);
     const contentHash = sha256Hex(rawContent);
     if (sources.getByContentHash(contentHash)) {
       fs.rmSync(pdfPath, { force: true });
@@ -162,4 +167,14 @@ function enqueueIngest(
     idempotencyKey: idempotencyKey(["ingest", sourceId, contentHash, CHUNKER_VERSION]),
   });
   // le job summary est chaîné à la fin de l'ingestion (voir ingest-service)
+}
+
+/**
+ * Titre d'une source importée par fichier : un nom de fichier abîmé (U+FFFD) n'est
+ * jamais stocké tel quel — il se retrouverait dans les prompts et la provenance.
+ */
+function checkedTitle(raw: string, content: string): string {
+  const { title, repaired, source } = sanitizeSourceTitle(raw, content);
+  if (repaired) console.warn(`[sources] titre de fichier abîmé, remplacé par le contenu : ${JSON.stringify(title)} (source: ${source})`);
+  return title;
 }
