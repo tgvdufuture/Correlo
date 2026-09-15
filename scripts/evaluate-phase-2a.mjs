@@ -53,12 +53,73 @@ const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 const domainOf = (sourceId) => manifest[sourceId] ?? "?";
 
 const db = new Database(dbPath, { readonly: true });
-const runsFile = "./data/discover_runs.json";
-const allRuns = fs.existsSync(runsFile) ? JSON.parse(fs.readFileSync(runsFile, "utf8")).runs : [];
-const runs = runFilter ? allRuns.filter((r) => runFilter.includes(r.run_id)) : allRuns;
-if (runs.length === 0) {
-  console.error("Aucun run trouvé (data/discover_runs.json) — lancer scripts/discover.mjs d'abord.");
+// Les runs vivent désormais en base (`discover_runs`, migration 005 — Phase 2B) :
+// l'identité d'un run est une entité persistante, plus un fichier à côté de la DB.
+const hasRunTable = !!db
+  .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'discover_runs'")
+  .get();
+if (!hasRunTable) {
+  console.error("Table discover_runs absente — migration 005 non appliquée sur cette base.");
   process.exit(1);
+}
+// Une comparaison Q22 se fait **à budget égal**, entre l'échantillonneur diversifié et
+// la baseline top-6 : c'est le couple le plus récent de runs terminés partageant le
+// même nombre de paires. Prendre « le dernier run de chaque échantillonneur » serait
+// faux dès qu'un run isolé (autre budget, autre corpus — un run de validation 2B, par
+// exemple) termine après la paire de comparaison : il entrerait dans le verdict.
+// `--runs=` impose une paire explicite (statut quelconque, pour inspecter un échec).
+const doneRuns = runFilter
+  ? []
+  : db
+      .prepare("SELECT * FROM discover_runs WHERE status = 'done' ORDER BY completed_at DESC, rowid DESC")
+      .all();
+let comparisonPair = [];
+if (!runFilter) {
+  for (const r of doneRuns) {
+    const mate = doneRuns.find((o) => o.sampler !== r.sampler && o.pairs === r.pairs);
+    if (mate) {
+      comparisonPair = [r, mate].sort((a) => (a.sampler === "diversified" ? -1 : 1));
+      break;
+    }
+  }
+}
+const runRows = runFilter
+  ? db
+      .prepare(`SELECT * FROM discover_runs WHERE run_id IN (${runFilter.map(() => "?").join(",")})`)
+      .all(...runFilter)
+  : comparisonPair;
+const allRuns = runRows.map((r) => ({
+  run_id: r.run_id,
+  sampler: r.sampler,
+  sampler_version: r.sampler_version,
+  corpus_hash: r.corpus_hash,
+  seed: r.seed,
+  prompt_version: r.prompt_version,
+  chat_model: r.chat_model,
+  status: r.status,
+  pairs: r.pairs,
+  batch_calls: r.batch_calls,
+  batch_calls_from_cache: r.batch_calls_from_cache,
+  created: r.created,
+  created_ids: JSON.parse(r.created_ids),
+  skipped: JSON.parse(r.skipped),
+}));
+const runs = allRuns;
+if (runs.length === 0) {
+  console.error("Aucun run dans discover_runs — lancer scripts/discover.mjs d'abord.");
+  process.exit(1);
+}
+console.log(
+  `Runs évalués : ${runs.map((r) => `${r.run_id} (${r.sampler}, ${r.pairs} paires, ${r.created} suggestions)`).join(" · ")}`
+);
+if (runs.length === 2 && runs[0].pairs !== runs[1].pairs) {
+  console.warn(
+    `⚠ budgets différents (${runs.map((r) => r.pairs).join(" vs ")} paires) : le comparatif ` +
+      `Q22 se fait à budget égal — vérifier la sélection (--runs=…).`
+  );
+}
+if (runs.length === 2 && new Set(runs.map((r) => r.sampler)).size < 2) {
+  console.warn("⚠ sélection sans baseline : il faut un run diversified ET un run top6.");
 }
 
 // --- suggestions des runs (avec fragments + sources), dans l'ordre des runs ---

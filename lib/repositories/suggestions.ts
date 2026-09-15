@@ -37,7 +37,17 @@ export interface NewSuggestion {
 
 export type CreateResult =
   | { ok: true; id: string }
-  | { ok: false; reason: "fragment_missing" | "intra_source" | "blocked_variant" | "duplicate" };
+  | {
+      ok: false;
+      reason: "fragment_missing" | "intra_source" | "blocked_variant" | "duplicate";
+      /**
+       * `duplicate` uniquement : id de la suggestion **identique** déjà en base
+       * (même pair_key, même relation_type, même content_sig). Rejouer un run
+       * retombe sur ces lignes : c'est la preuve que le run reproduit sa propre
+       * sortie (Phase 2B, AC1) et non un échec d'insertion.
+       */
+      existingId?: string;
+    };
 
 export interface SuggestionsRepo {
   create(s: NewSuggestion): CreateResult;
@@ -86,8 +96,15 @@ export function createSuggestionsRepo(db: Db): SuggestionsRepo {
         ).run({ id, ...s });
         return { ok: true, id };
       } catch {
-        // UNIQUE(pair_key, relation_type, content_sig) — variante identique déjà présente
-        return { ok: false, reason: "duplicate" };
+        // UNIQUE(pair_key, relation_type, content_sig) — variante identique déjà
+        // présente : on renvoie son id (un rejeu doit pouvoir la reconnaître)
+        const existing = db
+          .prepare(
+            `SELECT id FROM suggestions
+             WHERE pair_key = ? AND relation_type = ? AND content_sig = ?`
+          )
+          .get(s.pair_key, s.relation_type, s.content_sig) as { id: string } | undefined;
+        return { ok: false, reason: "duplicate", existingId: existing?.id };
       }
     },
 

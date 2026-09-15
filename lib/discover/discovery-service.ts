@@ -11,7 +11,7 @@ import {
   pairKeyFor,
   type EpistemicStatus,
 } from "@/lib/discover/epistemic";
-import { makeSeed, samplePairs, type PairCandidate } from "@/lib/discover/sampler";
+import { makeSeed, samplePairs, SAMPLER_VERSION, type PairCandidate } from "@/lib/discover/sampler";
 import {
   claimAnchorTerms,
   claimTokens,
@@ -48,6 +48,24 @@ export interface DiscoveryRunOptions {
   interBatchDelayMs?: number;
   /** Cache par hash de prompt (modèle + prompt_version + contenu) — évite de re-payer un batch identique. */
   promptCache?: PromptCache;
+  /**
+   * Appelé dès que l'identité du run est connue (`corpus_hash`, `seed`) et
+   * **avant** le premier appel LLM : c'est là que le worker persiste la ligne
+   * `discover_runs` (Phase 2B, AC1). Un run qui échoue ensuite reste donc
+   * visible avec son identité, au lieu de ne laisser qu'un `progress_json`.
+   */
+  onStarted?: (info: {
+    runId: string;
+    corpusHash: string;
+    seed: string;
+    sampler: DiscoveryRunOptions["sampler"];
+    samplerVersion: string;
+    /** Version de prompt et modèle réellement utilisés : ce sont eux qui routent le cache. */
+    promptVersion: string;
+    chatModel: string;
+    pairsTotal: number;
+    sourceIds: string[];
+  }) => void;
   /** Progression cumulée (reprise incluse) — persistée par le worker pour survivre à une coupure. */
   onProgress?: (info: {
     processed: number;
@@ -76,11 +94,17 @@ export interface DiscoveryRunResult {
   corpusHash: string;
   seed: string;
   sampler: DiscoveryRunOptions["sampler"];
+  samplerVersion: string;
   pairsTotal: number;
   batchCalls: number;
   batchCallsFromCache: number;
   created: CreatedSuggestion[];
-  /** Ids de toutes les suggestions créées par le run, tentatives précédentes incluses. */
+  /**
+   * `createdIds` = **sortie du run**, pas seulement les insertions du dernier
+   * passage : un rejeu qui retombe sur des suggestions identiques les rattache à
+   * ce run (mêmes ids). C'est ce qui rend « rejouable à l'identique » vérifiable
+   * — et c'est ce que persiste `discover_runs.created_ids` (AC1).
+   */
   createdIds: string[];
   skipped: {
     duplicate: number;
@@ -156,12 +180,26 @@ export class DiscoveryService {
     });
     const startIdx = Math.min(Math.max(opts.startBatch ?? 0, 0), pairs.length);
     const resumeSkipped = opts.resume?.skipped ?? {};
+    // identité du run publiée avant le premier appel LLM : le worker y persiste
+    // `discover_runs` (AC1), un échec en cours de route laisse donc une trace
+    opts.onStarted?.({
+      runId: opts.runId,
+      corpusHash,
+      seed,
+      sampler: opts.sampler,
+      samplerVersion: SAMPLER_VERSION,
+      promptVersion: DISCOVERY_PROMPT_VERSION,
+      chatModel: this.deps.chatModel,
+      pairsTotal: pairs.length,
+      sourceIds: [...sourceIds],
+    });
 
     const result: DiscoveryRunResult = {
       runId: opts.runId,
       corpusHash,
       seed,
       sampler: opts.sampler,
+      samplerVersion: SAMPLER_VERSION,
       pairsTotal: pairs.length,
       batchCalls: opts.resume?.batchCalls ?? 0,
       batchCallsFromCache: opts.resume?.batchCallsFromCache ?? 0,
@@ -190,15 +228,23 @@ export class DiscoveryService {
     // signatures des claims déjà retenus : sert à rejeter les quasi-doublons
     // (même idée reformulée sur une autre paire — la dédup pair_key ne les voit pas)
     const coveredTokenSets = resumeClaims.map((c) => claimTokens(c));
+    // claims retenus par CE run, dans l'ordre où ils l'ont été — rejeu compris.
+    // C'est le contexte « déjà couvert » donné au modèle au batch suivant : le
+    // dériver des seules *insertions* rendrait un rejeu non reproductible (voir
+    // plus bas, un doublon doit avancer le contexte comme une insertion).
+    const runClaims: string[] = [];
 
     for (let i = startIdx; i < pairs.length; i += batchSize) {
       const batch = pairs.slice(i, i + batchSize);
-      const priorClaims = [...resumeClaims, ...result.created.map((c) => c.claim)].slice(-25);
+      const priorClaims = [...resumeClaims, ...runClaims].slice(-25);
       const results = await this.processBatch(batch, byId, opts, priorClaims);
       result.batchCalls += results.batchCalls;
       result.batchCallsFromCache += results.fromCache;
-      // 1 batch/min : la fenêtre ITPM du provider doit se vider entre deux appels
-      if (i + batchSize < pairs.length && opts.interBatchDelayMs) {
+      // 1 batch/min : la fenêtre ITPM du provider doit se vider entre deux appels.
+      // Un batch servi par le cache ne consomme aucun token : payer l'attente ferait
+      // durer un rejeu (dont tous les batchs sont en cache) exactement comme le run
+      // initial, alors qu'il ne touche pas le provider. La pause suit donc l'appel réel.
+      if (i + batchSize < pairs.length && opts.interBatchDelayMs && results.batchCalls > 0) {
         await sleep(opts.interBatchDelayMs);
       }
 
@@ -270,28 +316,42 @@ export class DiscoveryService {
           prompt_version: DISCOVERY_PROMPT_VERSION,
           chat_model: this.deps.chatModel,
         });
-        if (!insert.ok) {
-          const key = {
-            duplicate: "duplicate",
-            blocked_variant: "blocked",
-            intra_source: "intraSource",
-            fragment_missing: "fragmentMissing",
-          }[insert.reason] as keyof typeof result.skipped;
-          result.skipped[key] += 1;
+        // Une suggestion identique déjà en base n'est pas une perte : c'est la MÊME
+        // connexion, qu'un rejeu reproduit à l'identique (Phase 2B, AC1). Elle compte
+        // donc dans la sortie du run (`createdIds`) **et fait avancer son contexte**
+        // au même titre qu'une insertion. Sans ce second point, le prompt du batch
+        // suivant n'est plus celui du run d'origine — le modèle ignore quelles idées
+        // sont déjà retenues, le cache de prompt rate, et le rejeu produit d'autres
+        // claims : mesuré sur `val-div` rejoué, 12 suggestions neuves là où 0 était
+        // attendu (1 des 6 connexions retrouvée).
+        if (!insert.ok && (insert.reason !== "duplicate" || !insert.existingId)) {
+          result.skipped[INSERT_SKIP_KEY[insert.reason]] += 1;
           continue;
         }
-        coveredTokenSets.push(tokens);
-        result.created.push({
-          id: insert.id,
-          claim,
-          relationType: r.relationType,
-          tier: r.tier,
-          epistemicStatus: status,
-          pairKey: key,
-          a: { id: a.id, sourceId: a.sourceId, sourceTitle: a.sourceTitle, text: a.text },
-          b: { id: b.id, sourceId: b.sourceId, sourceTitle: b.sourceTitle, text: b.text },
-        });
-        result.createdIds.push(insert.id);
+        // `existingId` est garanti ici (branche précédente) : un doublon est une
+        // connexion identique à rattacher au run, pas un rejet.
+        const suggestionId = insert.ok ? insert.id : (insert.existingId as string);
+        // Une reprise peut re-proposer une suggestion déjà portée par le checkpoint :
+        // elle ne doit ni doubler les compteurs ni répéter le claim au modèle.
+        if (!result.createdIds.includes(suggestionId)) {
+          result.createdIds.push(suggestionId);
+          coveredTokenSets.push(tokens);
+          runClaims.push(claim);
+        }
+        if (insert.ok) {
+          result.created.push({
+            id: suggestionId,
+            claim,
+            relationType: r.relationType,
+            tier: r.tier,
+            epistemicStatus: status,
+            pairKey: key,
+            a: { id: a.id, sourceId: a.sourceId, sourceTitle: a.sourceTitle, text: a.text },
+            b: { id: b.id, sourceId: b.sourceId, sourceTitle: b.sourceTitle, text: b.text },
+          });
+        } else {
+          result.skipped.duplicate += 1;
+        }
       }
       opts.onProgress?.({
         processed: Math.min(i + batchSize, pairs.length),
@@ -413,6 +473,14 @@ export class DiscoveryService {
     return { attached: attachResults(parsed), batchCalls: 1, fromCache: 0 };
   }
 }
+
+/** Rejet d'insertion → compteur de `skipped` correspondant. */
+const INSERT_SKIP_KEY = {
+  duplicate: "duplicate",
+  blocked_variant: "blocked",
+  intra_source: "intraSource",
+  fragment_missing: "fragmentMissing",
+} as const;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

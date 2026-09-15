@@ -14,6 +14,17 @@ import { dotProduct, kMeansVectors, mulberry32 } from "@/lib/cluster/kmeans";
  */
 export { mulberry32 };
 
+/**
+ * Version de l'algorithme d'échantillonnage — persistée dans
+ * `discover_runs.sampler_version` (Phase 2B, AC1).
+ *
+ * À incrémenter dès que la **sélection** change (top-k, nombre de clusters,
+ * quotas, ordre d'itération) : un run dont la version diffère ne décrit plus le
+ * même échantillon, donc n'est plus « rejouable à l'identique » — c'est ce que la
+ * colonne permet de détecter, elle qui accompagne la seed rejouée.
+ */
+export const SAMPLER_VERSION = "sampler-v1";
+
 export interface DiscoveryFragment {
   id: string;
   sourceId: string;

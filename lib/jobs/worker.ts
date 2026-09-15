@@ -13,6 +13,7 @@ import { IngestService, JobStolenError, type IngestDeps } from "@/lib/ingest/ing
 import { EmbeddingService } from "@/lib/ingest/embedding-service";
 import { SummaryService } from "@/lib/ingest/summary-service";
 import { DiscoveryService } from "@/lib/discover/discovery-service";
+import { createDiscoverRunsRepo, type DiscoverRunsRepo } from "@/lib/repositories/discover-runs";
 import { createSuggestionsRepo } from "@/lib/repositories/suggestions";
 import { SynthesisService, type SynthesisRunResult } from "@/lib/synth/synth-service";
 import { createThemesRepo } from "@/lib/repositories/themes";
@@ -29,6 +30,9 @@ export interface WorkerDeps {
   summary: SummaryService;
   /** Kind discover (Phase 2A) — optionnel pour les tests existants. */
   discover?: DiscoveryService;
+  /** Métadonnées de run discover (Phase 2B, AC1) — optionnel : sans lui, le run
+   *  n'est décrit que par `progress_json` (comportement d'avant la 005). */
+  discoverRuns?: DiscoverRunsRepo;
   /** Kind synthesize (Phase 5A) — optionnel pour les tests existants. */
   synthesize?: SynthesisService;
   maxAttempts?: number;
@@ -102,6 +106,13 @@ export class Worker {
           const payload = JSON.parse(job.payload) as { source_id: string };
           this.deps.summary.markSourceSummaryFailed(payload.source_id);
         }
+        // run discover épuisé : son identité reste consultable avec l'erreur. Une
+        // simple reprise (tentatives restantes) ne le marque PAS : il reste
+        // reprenable au checkpoint, donc `running`.
+        if (job.kind === "discover") {
+          const runId = runIdOf(job.payload);
+          if (runId) this.deps.discoverRuns?.failRun(runId, (err as Error).message);
+        }
       } else {
         const retryAfter =
           err instanceof LlmRateLimitError ? err.retryAfterSeconds : undefined;
@@ -111,7 +122,10 @@ export class Worker {
     }
   }
 
-  /** Job discover (Phase 2A) : pipeline complet, métadonnées de run dans progress_json. */
+  /**
+   * Job discover (Phase 2A → 2B) : pipeline complet, identité du run persistée
+   * dans `discover_runs` (migration 005) **et** compteurs repris par le checkpoint.
+   */
   private async runDiscover(job: ClaimedJob, discover: DiscoveryService): Promise<void> {
     const payload = JSON.parse(job.payload) as {
       run_id: string;
@@ -175,6 +189,21 @@ export class Worker {
               skipped: resume.skipped,
             }
           : undefined,
+        // identité du run (corpus_hash, seed, versions) publiée avant le premier
+        // appel LLM : c'est la ligne que la Phase 2B exige de retrouver en base
+        onStarted: (info) => {
+          this.deps.discoverRuns?.startRun({
+            runId: info.runId,
+            jobId: job.id,
+            sampler: info.sampler,
+            samplerVersion: info.samplerVersion,
+            corpusHash: info.corpusHash,
+            seed: info.seed,
+            promptVersion: info.promptVersion,
+            chatModel: info.chatModel,
+            sourceIds: info.sourceIds,
+          });
+        },
         onProgress: (info) => {
           this.deps.jobs.updateCheckpoint(
             job.id,
@@ -195,11 +224,21 @@ export class Worker {
     } finally {
       clearInterval(leaseTimer);
     }
+    // sortie du run persistée (identité + compteurs) : `discover_runs` devient la
+    // source de vérité, `progress_json` n'en est plus qu'une copie de commodité
+    this.deps.discoverRuns?.finishRun(result.runId, {
+      pairs: result.pairsTotal,
+      batchCalls: result.batchCalls,
+      batchCallsFromCache: result.batchCallsFromCache,
+      createdIds: result.createdIds,
+      skipped: result.skipped,
+    });
     const summary = {
       run_id: result.runId,
       corpus_hash: result.corpusHash,
       seed: result.seed,
       sampler: result.sampler,
+      sampler_version: result.samplerVersion,
       pairs: result.pairsTotal,
       batch_calls: result.batchCalls,
       batch_calls_from_cache: result.batchCallsFromCache,
@@ -351,6 +390,16 @@ export class Worker {
   }
 }
 
+/** `run_id` d'un payload discover (payload illisible ⇒ undefined, jamais d'exception ici). */
+function runIdOf(payload: string): string | undefined {
+  try {
+    const parsed = JSON.parse(payload) as { run_id?: string };
+    return parsed.run_id;
+  } catch {
+    return undefined;
+  }
+}
+
 function serializeError(err: unknown): string {
   if (err instanceof LlmRateLimitError) {
     return JSON.stringify({ code: "rate_limited", message: err.message });
@@ -404,6 +453,9 @@ export function createWorker(): Worker {
     chatSignature,
     promptCache,
   });
+  // Métadonnées de run (Phase 2B, AC1) : la base porte l'identité des runs discover,
+  // rejouables à l'identique (PRIMARY KEY run_id, upsert au rejeu).
+  const discoverRuns = createDiscoverRunsRepo(db);
   const synthesize = new SynthesisService({
     db,
     themes: createThemesRepo(db),
@@ -413,5 +465,5 @@ export function createWorker(): Worker {
     chatSignature,
     promptCache,
   });
-  return new Worker({ jobs, ingest, summary, discover, synthesize });
+  return new Worker({ jobs, ingest, summary, discover, discoverRuns, synthesize });
 }

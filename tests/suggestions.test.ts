@@ -45,8 +45,15 @@ describe("repository suggestions", () => {
     makeFragment(db, { sourceId: s1, text: "aaa", id: "frag-a" });
     makeFragment(db, { sourceId: s2, text: "bbb", id: "frag-b" });
     const repo = createSuggestionsRepo(db);
-    expect(repo.create(newSuggestion()).ok).toBe(true);
-    expect(repo.create(newSuggestion())).toEqual({ ok: false, reason: "duplicate" });
+    const first = repo.create(newSuggestion());
+    expect(first.ok).toBe(true);
+    // le doublon renvoie l'id de la ligne identique : un rejeu de run doit pouvoir
+    // reconnaître qu'il reproduit SA sortie (Phase 2B, AC1) et non un échec
+    expect(repo.create(newSuggestion())).toEqual({
+      ok: false,
+      reason: "duplicate",
+      existingId: (first as { id: string }).id,
+    });
   });
 
   it("variante bloquée : accepted/rejected sur (pair_key, relation_type) interdit l'insertion", () => {

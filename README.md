@@ -69,6 +69,23 @@ Scénario manuel :
    résumé `terminé` (ou `échec` avec `missing_groq_api_key` sans clé).
 5. Redémarrer pendant une ingestion : le job reprend au checkpoint, aucun doublon.
 
+## Validation (Phases 1B, 2A, 2B)
+
+Mêmes prérequis que ci-dessus (corpus réel de `data/corpus_manifest.json`, Ollama pour
+les embeddings, `GROQ_API_KEY` pour le chat) :
+
+```bash
+npm run validate:corpus    # 1B : locators re-slicés, BLOB conformes, ≤ 5 000 fragments
+npm run dev                # le worker exécute les jobs discover (à laisser tourner)
+npm run discover -- --run-id=val-div --max-pairs=48 --batch-size=4
+npm run validate:phase2b   # 2B : identité de run persistée + contraintes §3.3
+npm run eval:phase2a       # 2A : rapport + grille des 2 évaluateurs + verdict Q22
+```
+
+L'identité d'un run discover — `run_id`, `corpus_hash`, `seed`, `sampler_version` — est
+persistée dans la table `discover_runs` (migration 005). Relancer le même `--run-id`
+**rejoue le même run** (mêmes paires, mêmes prompts) au lieu d'en créer un autre.
+
 ## Architecture
 
 - **Base** : SQLite via `better-sqlite3` (WAL, `foreign_keys = ON`), schéma

@@ -2,9 +2,12 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { z } from "zod";
 import { makeFragment, makeTestDb, makeTextSource, makeFakeEmbedder } from "./helpers";
+import { sha256Hex } from "@/lib/hash";
 import { LlmTransientError } from "@/lib/llm/errors";
 import { DiscoveryService } from "@/lib/discover/discovery-service";
+import { SAMPLER_VERSION } from "@/lib/discover/sampler";
 import { DISCOVERY_PROMPT_VERSION } from "@/lib/discover/prompts";
+import { createDiscoverRunsRepo } from "@/lib/repositories/discover-runs";
 import { createSuggestionsRepo } from "@/lib/repositories/suggestions";
 import { createFragmentsRepo } from "@/lib/repositories/fragments";
 import { createSourcesRepo } from "@/lib/repositories/sources";
@@ -156,7 +159,12 @@ describe("découverte (pipeline Phase 2A)", () => {
 
   it("re-run à l'identique : 0 nouvelle suggestion (dédup UNIQUE), batchs rejoués", async () => {
     const { db, sourceIds, service } = makeDiscovery();
-    await service.run(sourceIds, { runId: "run-1", sampler: "diversified", maxPairs: 8, batchSize: 10 });
+    const first = await service.run(sourceIds, {
+      runId: "run-1",
+      sampler: "diversified",
+      maxPairs: 8,
+      batchSize: 10,
+    });
     const second = await service.run(sourceIds, {
       runId: "run-1",
       sampler: "diversified",
@@ -165,8 +173,114 @@ describe("découverte (pipeline Phase 2A)", () => {
     });
     expect(second.created).toHaveLength(0);
     expect(second.skipped.duplicate).toBe(7);
+    // Phase 2B, AC1 : le rejeu retombe sur les MÊMES suggestions (mêmes ids). La
+    // sortie du run est donc reproductible, pas seulement « sans doublon ».
+    expect(second.createdIds).toEqual(first.createdIds);
+    expect(second.corpusHash).toBe(first.corpusHash);
+    expect(second.seed).toBe(first.seed);
     const count = db.prepare("SELECT COUNT(*) AS n FROM suggestions").get() as { n: number };
     expect(count.n).toBe(7);
+  });
+
+  /**
+   * AC1, cœur du « rejouable à l'identique » : un rejeu doit reconstruire le
+   * **contexte** du run (les claims déjà retenus), pas seulement retrouver les
+   * mêmes paires. Le LLM factice rend ici un claim qui dépend du prompt entier :
+   * si le contexte n'est pas reconstruit, les batchs suivants produisent d'autres
+   * claims et le rejeu insère de nouvelles suggestions (12 mesurées sur `val-div`
+   * rejoué avant ce correctif, une seule des 6 connexions retrouvée). Aucun cache
+   * de prompt n'est utilisé : seul le contexte entre dans le prompt.
+   */
+  it("rejeu à l'identique : le contexte « déjà retenu » est reconstruit, pas seulement les paires", async () => {
+    const { db } = makeTestDb();
+    const sourceIds = buildCorpus(db);
+    class ContextSensitiveLlm extends FakeDiscoveryLlm {
+      async chat<T extends z.ZodType>(messages: ChatMessage[], schema: T): Promise<z.infer<T>> {
+        this.calls += 1;
+        const user = messages.find((m) => m.role === "user")?.content ?? "";
+        const h = createHash("sha256").update(user).digest("hex");
+        const count = (user.match(/--- Paire /g) ?? []).length;
+        const results = [];
+        for (let i = 0; i < count; i++) {
+          results.push({
+            candidate_id: i,
+            claim:
+              `Le mecanisme${h.slice(i, i + 6)} contredit le dispositif${h.slice(6 + i, 12 + i)} ` +
+              `sur le principe${h.slice(12 + i, 18 + i)}.`,
+            relation_type: "analogy",
+            tier: "medium",
+            epistemic_status: "INFERENCE",
+          });
+        }
+        return schema.parse({ results });
+      }
+    }
+    const llm = new ContextSensitiveLlm();
+    const service = new DiscoveryService({
+      db,
+      suggestions: createSuggestionsRepo(db),
+      chat: llm,
+      chatModel: "test-model",
+    });
+    const opts = { runId: "run-contexte", sampler: "diversified" as const, maxPairs: 8, batchSize: 3 };
+
+    const first = await service.run(sourceIds, opts);
+    expect(first.batchCalls).toBe(3); // 8 paires → 3 batchs (3 + 3 + 2)
+    expect(first.createdIds.length).toBeGreaterThan(1);
+
+    const second = await service.run(sourceIds, opts);
+    expect(second.created).toHaveLength(0);
+    expect(second.createdIds).toEqual(first.createdIds);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM suggestions").get()).toEqual({
+      n: first.createdIds.length,
+    });
+  });
+
+  /**
+   * Phase 2B AC2 : les suggestions créées respectent §3.3 — 0 paire intra-source,
+   * 0 doublon (pair_key, relation_type, content_sig), pair_key canonique. C'est ce
+   * que le validateur rejoue sur les runs réels, vérifié ici sur le pipeline.
+   */
+  it("AC2 : les suggestions créées respectent les contraintes §3.3", async () => {
+    const { db, sourceIds, service } = makeDiscovery();
+    await service.run(sourceIds, {
+      runId: "run-3-3",
+      sampler: "diversified",
+      maxPairs: 8,
+      batchSize: 10,
+    });
+    const rows = db
+      .prepare(
+        `SELECT s.relation_type, s.pair_key, s.content_sig, s.fragment_a_id AS fa, s.fragment_b_id AS fb,
+                fa.source_id AS sa, fb.source_id AS sb
+         FROM suggestions s
+         JOIN fragments fa ON fa.id = s.fragment_a_id
+         JOIN fragments fb ON fb.id = s.fragment_b_id`
+      )
+      .all() as {
+      relation_type: string;
+      pair_key: string;
+      content_sig: string;
+      fa: string;
+      fb: string;
+      sa: string;
+      sb: string;
+    }[];
+    expect(rows).toHaveLength(7);
+    for (const r of rows) {
+      expect(r.sa).not.toBe(r.sb); // 0 paire intra-source
+      // pair_key : ids triés (analogy/contradiction), paire ordonnée (cause)
+      const sorted = r.fa < r.fb ? `${r.fa}:${r.fb}` : `${r.fb}:${r.fa}`;
+      const allowed = r.relation_type === "cause" ? [`${r.fa}:${r.fb}`, `${r.fb}:${r.fa}`] : [sorted];
+      expect(allowed).toContain(r.pair_key);
+    }
+    const dupes = db
+      .prepare(
+        `SELECT pair_key, relation_type, content_sig, COUNT(*) AS n FROM suggestions
+         GROUP BY pair_key, relation_type, content_sig HAVING n > 1`
+      )
+      .all();
+    expect(dupes).toHaveLength(0);
   });
 
   it("cache de prompts : batch identique servi sans appel réseau", async () => {
@@ -221,7 +335,7 @@ describe("découverte (pipeline Phase 2A)", () => {
   it("reprise au checkpoint : les compteurs cumulés ne repartent pas de zéro", async () => {
     const { sourceIds, service } = makeDiscovery();
     const progress: { processed: number; created: number; createdIds: string[] }[] = [];
-    await service.run(sourceIds, {
+    const full = await service.run(sourceIds, {
       runId: "run-cumul",
       sampler: "diversified",
       maxPairs: 12,
@@ -233,8 +347,9 @@ describe("découverte (pipeline Phase 2A)", () => {
     expect(afterBatch0.processed).toBe(10);
     expect(afterBatch0.created).toBeGreaterThan(0);
 
-    // reprise après coupure : le batch 0 est déjà en DB, ses créations doivent
-    // rester dans le rapport (sinon un run repris sous-estime son propre travail)
+    // reprise après coupure (checkpoint = batch 0 terminé) : le batch interrompu est
+    // rejoué, il retombe sur ses propres lignes — la sortie cumulée du run doit
+    // donc être **identique** à celle du run complet, et non amputée du rejeu.
     const resumed = await service.run(sourceIds, {
       runId: "run-cumul",
       sampler: "diversified",
@@ -243,9 +358,9 @@ describe("découverte (pipeline Phase 2A)", () => {
       startBatch: 10,
       resume: { createdIds: afterBatch0.createdIds, batchCalls: 1 },
     });
-    expect(resumed.created).toHaveLength(0); // batch 1 déjà en DB → doublons
-    expect(resumed.createdIds).toEqual(afterBatch0.createdIds);
-    expect(resumed.createdIds).toHaveLength(afterBatch0.created);
+    expect(resumed.created).toHaveLength(0); // rien de neuf : le batch 1 est déjà en DB
+    expect(resumed.createdIds).toEqual(full.createdIds);
+    expect(resumed.createdIds).toHaveLength(afterBatch0.created + 2);
     expect(resumed.batchCalls).toBe(2); // tentative précédente (1) + batch rejoué (1)
   });
 
@@ -516,40 +631,51 @@ describe("découverte (pipeline Phase 2A)", () => {
   });
 });
 
+/** Worker complet (ingest/summary/discover) sur une base de test. */
+function makeDiscoverWorker(
+  db: ReturnType<typeof makeTestDb>["db"],
+  llm: FakeDiscoveryLlm,
+  discoverRuns?: ReturnType<typeof createDiscoverRunsRepo>
+): Worker {
+  const sources = createSourcesRepo(db);
+  const fragments = createFragmentsRepo(db);
+  const jobs = createJobsRepo(db);
+  const discover = new DiscoveryService({
+    db,
+    suggestions: createSuggestionsRepo(db),
+    chat: llm,
+    chatModel: "test-model",
+  });
+  return new Worker({
+    jobs,
+    ingest: new IngestService({
+      db,
+      sources,
+      fragments,
+      jobs,
+      embedder: makeFakeEmbedder(8),
+      chatModel: "test-model",
+    }),
+    summary: new SummaryService({
+      db,
+      sources,
+      jobs,
+      llm: llm as unknown as LlmProvider,
+      chatModel: "test-model",
+      groqKeyMissing: false,
+    }),
+    discover,
+    discoverRuns,
+  });
+}
+
 describe("worker : job discover", () => {
   it("process() : progress_json rempli (created_ids) puis done", async () => {
     const { db } = makeTestDb();
     const sourceIds = buildCorpus(db);
-    const sources = createSourcesRepo(db);
-    const fragments = createFragmentsRepo(db);
     const jobs = createJobsRepo(db);
     const llm = new FakeDiscoveryLlm();
-    const discover = new DiscoveryService({
-      db,
-      suggestions: createSuggestionsRepo(db),
-      chat: llm,
-      chatModel: "test-model",
-    });
-    const worker = new Worker({
-      jobs,
-      ingest: new IngestService({
-        db,
-        sources,
-        fragments,
-        jobs,
-        embedder: makeFakeEmbedder(8),
-        chatModel: "test-model",
-      }),
-      summary: new SummaryService({
-        db,
-        sources,
-        jobs,
-        llm: llm as unknown as LlmProvider,
-        chatModel: "test-model",
-        groqKeyMissing: false,
-      }),
-      discover,
-    });
+    const worker = makeDiscoverWorker(db, llm);
 
     const job = jobs.createJob({
       kind: "discover",
@@ -567,5 +693,62 @@ describe("worker : job discover", () => {
     expect(summary.created).toBe(7); // candidate 5 ignorée (cause sans sens)
     expect(summary.created_ids).toHaveLength(7);
     expect(summary.pairs).toBe(8);
+  });
+
+  /**
+   * Phase 2B AC1 : le job discover persiste `run_id`, `corpus_hash`, `seed` et
+   * `sampler_version`, et le run est rejouable à l'identique.
+   *
+   * Le contrôle porte sur le fait que l'identité est **recalculable à partir du
+   * corpus**, sans le payload du job : c'est ce qui rend un run rejouable par
+   * quelqu'un qui n'a que la base.
+   */
+  it("AC1 : l'identité du run est persistée et recalculable, et un rejeu reproduit la même sortie", async () => {
+    const { db } = makeTestDb();
+    const sourceIds = buildCorpus(db);
+    const jobs = createJobsRepo(db);
+    const llm = new FakeDiscoveryLlm();
+    const discoverRuns = createDiscoverRunsRepo(db);
+    const worker = makeDiscoverWorker(db, llm, discoverRuns);
+    const payload = {
+      run_id: "run-2b",
+      source_ids: sourceIds,
+      sampler: "diversified" as const,
+      max_pairs: 8,
+      batch_size: 10,
+    };
+    const key = idempotencyKey(["discover", "run-2b"]);
+
+    jobs.createJob({ kind: "discover", payload, sourceId: null, idempotencyKey: key });
+    const [claimed] = jobs.claim(1);
+    await worker.process(claimed as ClaimedJob);
+
+    const run = discoverRuns.getByRun("run-2b");
+    expect(run?.status).toBe("done");
+    expect(run?.sampler).toBe("diversified");
+    expect(run?.sampler_version).toBe(SAMPLER_VERSION);
+    expect(run?.prompt_version).toBe(DISCOVERY_PROMPT_VERSION);
+    expect(JSON.parse(run?.source_ids as string)).toEqual(sourceIds);
+    expect(run?.created).toBe(7);
+    expect(JSON.parse(run?.created_ids as string)).toHaveLength(7);
+    // identité recalculable depuis le corpus figé (le payload du job n'est pas nécessaire)
+    const hashes = db
+      .prepare(`SELECT id, content_hash FROM sources WHERE id IN (${sourceIds.map(() => "?").join(",")})`)
+      .all(...sourceIds) as { id: string; content_hash: string }[];
+    const corpusHash = sha256Hex(hashes.map((h) => `${h.id}:${h.content_hash}`).sort().join("|"));
+    expect(run?.corpus_hash).toBe(corpusHash);
+    expect(run?.seed).toBe(sha256Hex(`${corpusHash}|run-2b`));
+
+    // rejeu : même run_id, même corpus → mêmes paires, mêmes claims, mêmes ids
+    jobs.createJob({ kind: "discover", payload, sourceId: null, idempotencyKey: key });
+    const [again] = jobs.claim(1);
+    await worker.process(again as ClaimedJob);
+    const replayed = discoverRuns.getByRun("run-2b");
+    expect(replayed?.created_ids).toBe(run?.created_ids);
+    expect(replayed?.created).toBe(run?.created);
+    expect(JSON.parse(replayed?.skipped as string).duplicate).toBe(7);
+    // un seul run en base, et aucune suggestion ajoutée par le rejeu
+    expect(discoverRuns.list().map((r) => r.run_id)).toEqual(["run-2b"]);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM suggestions").get()).toEqual({ n: 7 });
   });
 });

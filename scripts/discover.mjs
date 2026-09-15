@@ -6,13 +6,22 @@
  *     [--max-pairs-per-source=20] [--batch-size=10] [--wait=600] [--db=./data/serendipity.db]
  *
  * Le job est exécuté par le worker du serveur (npm run dev) ; le CLI suit
- * la progression (progress_json) et produit le rapport + discover_runs.json.
- * Les suggestions créées le sont avec les contraintes §3.3 (dédup, variantes
- * bloquées, cross-source) — un run est rejouable à l'identique (seed déterministe).
+ * la progression (progress_json) et produit le rapport. Les suggestions créées
+ * le sont avec les contraintes §3.3 (dédup, variantes bloquées, cross-source) —
+ * un run est rejouable à l'identique (seed déterministe).
+ *
+ * Depuis la Phase 2B, l'identité du run (`run_id`, `corpus_hash`, `seed`,
+ * `sampler_version`) est **persistée en base** par le worker dans `discover_runs`
+ * (migration 005) et lue ici depuis la base : plus de fichier `discover_runs.json`
+ * à côté de la DB. Relancer le CLI avec le même `--run-id` rejoue le même run.
  */
 import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+// Import direct du .ts (Node 24 retire les types ; l'import de `prompts.ts` n'a
+// que des imports `type`, sans alias) : la version de prompt qui invalide
+// l'idempotency key n'est plus recopiée à la main dans le CLI.
+import { DISCOVERY_PROMPT_VERSION } from "../lib/discover/prompts.ts";
 
 const args = Object.fromEntries(
   process.argv.slice(2).map((a) => {
@@ -66,9 +75,8 @@ for (const line of fs.readFileSync("./.env.local", "utf8").split("\n")) {
 }
 const chatModel =
   env.LLM_CHAT_PROVIDER === "ollama" ? env.OLLAMA_CHAT_MODEL : env.GROQ_CHAT_MODEL ?? "";
-// Doit suivre DISCOVERY_PROMPT_VERSION (lib/discover/prompts.ts) : c'est lui qui
-// invalide l'idempotency key quand le prompt change.
-const promptVersion = "discovery-v4";
+// C'est lui qui invalide l'idempotency key quand le prompt change.
+const promptVersion = DISCOVERY_PROMPT_VERSION;
 const idempotencyKey = createHash("sha256")
   .update(["discover", runId, sampler, corpusHash, String(maxPairs), promptVersion, chatModel].join("|"), "utf8")
   .digest("hex");
@@ -132,37 +140,39 @@ for (;;) {
   await new Promise((r) => setTimeout(r, 2000));
 }
 
-// rapport
-const summary = JSON.parse(db.prepare("SELECT progress_json FROM jobs WHERE id = ?").get(job.id).progress_json);
-const ids = summary.created_ids ?? [];
+// rapport — l'identité du run est lue depuis la base (Phase 2B, AC1), pas depuis
+// le progress_json du job ni depuis un fichier annexe : c'est la même ligne que
+// celle sur laquelle porte la validation de la phase.
+const run = db.prepare("SELECT * FROM discover_runs WHERE run_id = ?").get(runId);
+if (!run) {
+  console.error(
+    `Run ${runId} terminé, mais absent de discover_runs — le worker du serveur ` +
+      `persiste-t-il l'identité du run (migration 005 + serveur à jour) ?`
+  );
+  process.exit(1);
+}
+const summary = {
+  pairs: run.pairs,
+  batch_calls: run.batch_calls,
+  batch_calls_from_cache: run.batch_calls_from_cache,
+  created: run.created,
+  skipped: JSON.parse(run.skipped),
+};
+const ids = JSON.parse(run.created_ids);
 const rows = ids.length
   ? db
       .prepare(`SELECT * FROM suggestions WHERE id IN (${ids.map(() => "?").join(",")})`)
       .all(...ids)
   : [];
 
-const runsFile = "./data/discover_runs.json";
-const runs = fs.existsSync(runsFile) ? JSON.parse(fs.readFileSync(runsFile, "utf8")) : { runs: [] };
-runs.runs.push({
-  run_id: runId,
-  sampler,
-  corpus_hash: corpusHash,
-  seed,
-  created_at: now,
-  completed_at: new Date().toISOString(),
-  pairs: summary.pairs,
-  batch_calls: summary.batch_calls,
-  batch_calls_from_cache: summary.batch_calls_from_cache,
-  created: summary.created,
-  created_ids: ids,
-  skipped: summary.skipped,
-  manifest: manifestPath,
-});
-fs.writeFileSync(runsFile, JSON.stringify(runs, null, 2));
-
 console.log(`\n=== Rapport du run ${runId} ===`);
+console.log(`Statut : ${run.status} · sampler ${run.sampler} (${run.sampler_version}) · prompt ${run.prompt_version} · modèle ${run.chat_model}`);
+console.log(`Corpus : ${JSON.parse(run.source_ids).length} docs · corpus_hash ${run.corpus_hash.slice(0, 12)}… · seed ${run.seed.slice(0, 12)}…`);
 console.log(`Paires échantillonnées : ${summary.pairs} · appels batch : ${summary.batch_calls}${summary.batch_calls_from_cache ? ` (+${summary.batch_calls_from_cache} depuis cache)` : ""}`);
-console.log(`Suggestions créées : ${summary.created}`);
+console.log(
+  `Suggestions : ${summary.created} (dont ${summary.skipped.duplicate ?? 0} déjà en base — ` +
+    `même paire, même relation, même claim : rattachées à ce run)`
+);
 console.log(`Skips : ${JSON.stringify(summary.skipped)}`);
 const byType = {};
 const byTier = {};
@@ -175,4 +185,5 @@ for (const s of rows) {
   console.log(`\n  [${s.id.slice(0, 8)}] ${s.relation_type} · ${s.tier} · ${s.epistemic_status}`);
   console.log(`    ${s.claim}`);
 }
-console.log(`\nRapport détaillé pour évaluateurs : node scripts/evaluate-phase-2a.mjs`);
+console.log(`\nRapport détaillé pour évaluateurs : npm run eval:phase2a`);
+console.log(`Contraintes §3.3 et identité du run : npm run validate:phase2b`);
