@@ -35,6 +35,27 @@ export class LlmNetworkError extends LlmError {
 }
 
 /**
+ * Incident **passager** du provider : `503 Service temporarily overloaded`, `408`,
+ * timeout, connexion coupée. Distinct de `LlmNetworkError` (qui couvre aussi les
+ * erreurs définitives : `404` modèle inconnu, hôte inexistant, clé refusée) parce que
+ * les deux ne méritent pas le même traitement.
+ *
+ * Constaté en réel (2026-09-14) sur NVIDIA NIM : un run de validation de 12 batchs a
+ * consommé **2 des 5 tentatives du job en 4 batchs** (1 × 503, 1 × timeout 300 s).
+ * Seul le `429` était réessayé dans le batch ; un incident passager remontait donc au
+ * worker, qui relançait le job — jusqu'à l'échec définitif d'un run que le provider
+ * pouvait encore servir. Le PRD borne les *jobs* à 5 tentatives (§3.4) ; un incident
+ * passager du provider ne devrait pas en consommer une (même principe que le 429).
+ */
+export class LlmTransientError extends LlmNetworkError {
+  constructor(message: string) {
+    super(message);
+    this.code = "llm_transient";
+    this.name = "LlmTransientError";
+  }
+}
+
+/**
  * Le provider a **refusé** la génération en mode JSON (`response_format: json_object`).
  *
  * Constaté en réel (2026-09-13) : un modèle de raisonnement peut épuiser son budget

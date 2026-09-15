@@ -19,6 +19,17 @@ describe("barrière qualité des claims", () => {
     for (const claim of generic) expect(rejectClaim(claim)).toBe("generic");
   });
 
+  it("défaut 1 — rejette les formules de comparaison (« deux modèles », « même logique »)", () => {
+    // Famille des formules vraies de n'importe quelle paire, mesurée sur le run
+    // jux-v1 : ces deux claims ont survécu à la barrière avant d'être ajoutés.
+    const compared = [
+      "Monsieur Roger recommande le nouvel élève selon son travail et sa conduite; le professeur Lidenbrock somme impulsivement son neveu Axel de le suivre, montrant deux modèles d'autorité.",
+      "Les deux procédés relèvent d'une même logique de progression.",
+      "Les deux auteurs proposent deux conceptions opposées de la preuve.",
+    ];
+    for (const claim of compared) expect(rejectClaim(claim)).toBe("generic");
+  });
+
   it("défaut 1 — laisse passer un claim qui porte sur un mécanisme précis", () => {
     expect(
       rejectClaim(

@@ -77,7 +77,17 @@ const EN_STOPWORDS = new Set(
     .filter(Boolean)
 );
 
-/** Mots outils français + termes trop fréquents pour servir de signature (quasi-doublons). */
+/**
+ * Mots outils français + termes trop fréquents pour servir de signature
+ * (quasi-doublons).
+ *
+ * Les **déterminants quantifieurs** (`aucune`, `plusieurs`, `quelques`…) y figurent
+ * explicitement : longs d'au moins 5 lettres, ils passaient la longueur minimale et
+ * étaient traités comme des termes de contenu. Conséquence mesurée sur le run
+ * `jux-v2` : `…les corps n'a aucune spontanéité; …le corps ne montre aucune force…`
+ * était considéré comme partageant un concept (« aucune »), donc épargné par la
+ * règle de juxtaposition — un mot grammatical sauvait une coordination vide.
+ */
 const FR_STOPWORDS = new Set(
   `le la les un une des du de d au aux a et ou mais or donc car ni que qui quoi dont ou quand comme si
    ce cet cette ces celui celle ceux celles il elle ils elles on nous vous je tu se sa son ses leur leurs
@@ -85,6 +95,7 @@ const FR_STOPWORDS = new Set(
    peut peuvent doit doivent fait font dire dit selon ainsi alors aussi autre autres meme memes tout tous toute toutes
    plus moins tres bien tres dans sur sous entre vers chez pour par avec sans apres avant depuis pendant
    pas ne non oui deja encore toujours jamais souvent parfois surtout presque ici la-bas
+   aucun aucune aucuns aucunes plusieurs quelque quelques certains certaines chaque
    fragment texte texte1 texte2 extrait passage auteur oeuvre livre page the and of is are that with which`
     .split(/\s+/)
     .filter(Boolean)
@@ -189,6 +200,14 @@ export interface TextRuleProfile {
   /** Nombre de mots outils anglais déclenchant « english ». */
   englishStopwordMin?: number;
   /**
+   * Marqueurs de généralité **supplémentaires**, ajoutés au socle
+   * `GENERIC_MARKERS` pour ce profil seul — permet à une phase d'interdire des
+   * formules qu'une autre doit tolérer (les claims et les synthèses ne partagent
+   * pas les mêmes).
+   */
+  extraGenericMarkers?: string[];
+
+  /**
    * Si fourni, un recouvrement lexical ≥ `PARAPHRASE_THRESHOLD` avec l'une des
    * preuves → « paraphrase ». Absent pour les claims (une paire n'est pas censée
    * paraphraser un fragment : c'est justement le défaut d'ancrage lexical qui est
@@ -211,7 +230,10 @@ export function rejectText(text: string, profile: TextRuleProfile): TextRejectio
 
   if (PLACEHOLDER_PATTERNS.some((re) => re.test(trimmed))) return "placeholder";
   const norm = normalizeText(trimmed);
-  if (GENERIC_MARKERS.some((m) => norm.includes(m))) return "generic";
+  const markers = profile.extraGenericMarkers
+    ? [...GENERIC_MARKERS, ...profile.extraGenericMarkers]
+    : GENERIC_MARKERS;
+  if (markers.some((m) => norm.includes(m))) return "generic";
   if (looksEnglish(trimmed, profile.englishStopwordMin)) return "english";
 
   if (profile.evidenceTexts && profile.evidenceTexts.length > 0) {
@@ -221,12 +243,34 @@ export function rejectText(text: string, profile: TextRuleProfile): TextRejectio
 }
 
 /**
- * Profil des claims (Phase 2A) — seuils inchangés depuis la barrière livrée le
- * 2026-09-11 : la modification de ces valeurs invaliderait la comparabilité des
- * runs déjà mesurés.
+ * Profil des claims (Phase 2A) — seuils numériques inchangés depuis la barrière
+ * livrée le 2026-09-11 : les modifier invaliderait la comparabilité des runs déjà
+ * mesurés.
+ *
+ * `extraGenericMarkers` (2026-09-15) ajoute la famille des **formules de
+ * comparaison** : « montrant deux modèles d'autorité », « même logique »… Ce sont
+ * des formules vraies de n'importe quelle paire de textes, exactement comme « les
+ * deux auteurs » — et elles étaient mesurées comme telles dans le run jux-v1 (le
+ * claim `Monsieur Roger…; …montrant deux modèles d'autorité.` a survécu à la
+ * barrière). Elles sont volontairement **propres aux claims** et non ajoutées au
+ * socle `GENERIC_MARKERS` : celui-ci est partagé avec les synthèses (5A), dont les
+ * runs validés restent comparables.
  */
 export const CLAIM_TEXT_PROFILE: TextRuleProfile = {
   maxWords: 40,
   maxSentences: 2,
   emptyReason: "generic",
+  extraGenericMarkers: [
+    "montrant deux",
+    "deux modeles",
+    "deux conceptions",
+    "deux approches",
+    "deux visions",
+    "deux formes de",
+    "meme logique",
+    "meme mecanisme",
+    "meme fonction",
+    "meme principe",
+    "de la meme facon",
+  ],
 };

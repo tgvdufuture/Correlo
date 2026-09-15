@@ -3,7 +3,7 @@ import type { Db } from "@/lib/db/client";
 import { sha256Hex } from "@/lib/hash";
 import { decodeEmbedding } from "@/lib/llm/embedding-codec";
 import type { LlmProvider, PromptCache } from "@/lib/llm/types";
-import { LlmRateLimitError } from "@/lib/llm/errors";
+import { MAX_PROVIDER_ATTEMPTS, providerRetryDelayMs } from "@/lib/llm/retry";
 import { contentSig } from "@/lib/discover/epistemic";
 import { buildSeeds, SEED_VERSION, type SynthesisSeed } from "@/lib/synth/seeds";
 import { selectEvidence } from "@/lib/synth/select";
@@ -568,26 +568,29 @@ export class SynthesisService {
     });
   }
 
-  /** Même traitement du quota qu'en 2A : Retry-After respecté, sleep plafonné. */
+  /**
+   * Même traitement des incidents provider qu'en 2A (politique partagée) : ni un
+   * `429` (Retry-After respecté, plafonné) ni un `503`/timeout ne doit consommer une
+   * des 5 tentatives du job.
+   */
   private async chatWithRetry<T extends z.ZodType>(
     messages: Parameters<LlmProvider["chat"]>[0],
     schema: T
   ): Promise<z.infer<T>> {
-    for (let attempt = 0; attempt < 5; attempt++) {
+    for (let attempt = 0; attempt < MAX_PROVIDER_ATTEMPTS; attempt++) {
       const startedAt = Date.now();
       try {
         const parsed = await this.deps.chat.chat(messages, schema);
         console.log(`[synth] appel LLM (graine) : ${Date.now() - startedAt} ms`);
         return parsed;
       } catch (e) {
-        if (e instanceof LlmRateLimitError && attempt < 4) {
-          console.warn(
-            `[synth] rate-limit (Retry-After ${e.retryAfterSeconds}s) — tentative ${attempt + 1}/5`
-          );
-          await sleep((Math.min(e.retryAfterSeconds, 120) + 5) * 1000);
-          continue;
-        }
-        throw e;
+        const delay = providerRetryDelayMs(e, attempt);
+        if (delay === null || attempt === MAX_PROVIDER_ATTEMPTS - 1) throw e;
+        console.warn(
+          `[synth] incident provider — tentative ${attempt + 1}/${MAX_PROVIDER_ATTEMPTS} ` +
+            `dans ${Math.round(delay / 1000)}s : ${(e as Error).message.slice(0, 140)}`
+        );
+        await sleep(delay);
       }
     }
     throw new Error("synthèse sans résultat après tentatives");

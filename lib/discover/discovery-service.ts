@@ -12,9 +12,16 @@ import {
   type EpistemicStatus,
 } from "@/lib/discover/epistemic";
 import { makeSeed, samplePairs, type PairCandidate } from "@/lib/discover/sampler";
-import { claimTokens, isNearDuplicateClaim, rejectClaim } from "@/lib/discover/claim-rules";
+import {
+  claimAnchorTerms,
+  claimTokens,
+  isJuxtaposition,
+  isNearDuplicateClaim,
+  rejectClaim,
+} from "@/lib/discover/claim-rules";
+import { documentFrequency, rareThreshold } from "@/lib/quality/lexical-anchor";
 import type { SuggestionsRepo } from "@/lib/repositories/suggestions";
-import { LlmRateLimitError } from "@/lib/llm/errors";
+import { MAX_PROVIDER_ATTEMPTS, providerRetryDelayMs } from "@/lib/llm/retry";
 
 export interface DiscoveryRunOptions {
   runId: string;
@@ -86,6 +93,10 @@ export interface DiscoveryRunResult {
     invalidEntry: number;
     /** claim refusé par la barrière déterministe (générique, placeholder, anglais, fourre-tout). */
     claimRejected: number;
+    /** claim reliant les deux fragments par un mot rare partagé (ancrage lexical — Q22 : évident, donc pas une découverte). */
+    claimAnchored: number;
+    /** claim réduit à deux attributions coordonnées sans relation énoncée (« X dit A, tandis que Y dit B »). */
+    claimJuxtaposed: number;
     /** claim reformulant une idée déjà retenue dans ce run (quasi-doublon inter-paires). */
     nearDuplicate: number;
   };
@@ -129,6 +140,10 @@ export class DiscoveryService {
     // (7 000 tokens/min sur Groq free) — déviation documentée vs « batchs 8-10 »
     const batchSize = opts.batchSize ?? 3;
     const fragments = this.loadFragments(sourceIds);
+    // Ancrage lexical : la rareté d'un terme se mesure sur le corpus du run.
+    // Calculée une fois (pas par claim) — c'est le seul paramètre global de la règle.
+    const anchorDf = documentFrequency(fragments.map((f) => f.text));
+    const anchorThreshold = rareThreshold(fragments.length);
     const corpusHash = this.computeCorpusHash(sourceIds);
     const seed = makeSeed(corpusHash, opts.runId);
 
@@ -160,6 +175,8 @@ export class DiscoveryService {
         causeSideMissing: resumeSkipped.causeSideMissing ?? 0,
         invalidEntry: resumeSkipped.invalidEntry ?? 0,
         claimRejected: resumeSkipped.claimRejected ?? 0,
+        claimAnchored: resumeSkipped.claimAnchored ?? 0,
+        claimJuxtaposed: resumeSkipped.claimJuxtaposed ?? 0,
         nearDuplicate: resumeSkipped.nearDuplicate ?? 0,
       },
     };
@@ -210,6 +227,28 @@ export class DiscoveryService {
         if (rejection) {
           result.skipped.claimRejected += 1;
           console.warn(`[discover] claim rejeté (${rejection}) : ${claim.slice(0, 120)}`);
+          continue;
+        }
+        // barrière de juxtaposition : deux attributions coordonnées sans relation
+        // énoncée n'apportent rien (défaut 1 mesuré sur discovery-v4)
+        if (isJuxtaposition(claim)) {
+          result.skipped.claimJuxtaposed += 1;
+          console.warn(`[discover] claim rejeté (juxtaposition) : ${claim.slice(0, 120)}`);
+          continue;
+        }
+        // barrière d'ancrage lexical : la connexion ne doit pas tenir à un mot rare
+        // partagé — elle serait trouvable par mots-clés, donc évidente (PRD §4, Q22)
+        const anchors = claimAnchorTerms(claim, {
+          textA: a.text,
+          textB: b.text,
+          df: anchorDf,
+          threshold: anchorThreshold,
+        });
+        if (anchors.length > 0) {
+          result.skipped.claimAnchored += 1;
+          console.warn(
+            `[discover] claim rejeté (anchoring: ${anchors.join(", ")}) : ${claim.slice(0, 120)}`
+          );
           continue;
         }
         const tokens = claimTokens(claim);
@@ -345,30 +384,28 @@ export class DiscoveryService {
       const parsed = cached as z.infer<ReturnType<typeof makeDiscoveryBatchSchema>>;
       return { attached: attachResults(parsed), batchCalls: 0, fromCache: 1 };
     }
-    // retry interne sur rate-limit (Retry-After respecté) : la fenêtre ITPM se vide
-    // entre deux tentatives ; les attempts du job ne sont pas consommés par le quota
+    // Retry interne des incidents **passagers** (429 mais aussi 503/timeout) : ce sont
+    // des états du provider, pas des échecs du run. Les attempts du job restent
+    // réservés aux échecs réels (cf. lib/llm/retry.ts).
     let parsed: z.infer<ReturnType<typeof makeDiscoveryBatchSchema>> | null = null;
-    for (let attempt = 0; attempt < 5; attempt++) {
+    for (let attempt = 0; attempt < MAX_PROVIDER_ATTEMPTS; attempt++) {
       const startedAt = Date.now();
       try {
         parsed = await this.deps.chat.chat(messages, schema);
-        // trace de durée : un batch anormalement lent est un signal de quota atteint
+        // trace de durée : un batch anormalement lent est un signal de provider saturé
         console.log(
           `[discover] batch LLM (${batch.length} paires) : ${Date.now() - startedAt} ms`
         );
         break;
       } catch (e) {
-        if (e instanceof LlmRateLimitError && attempt < 4) {
-          // sleep plafonné : un retry-after énorme ne doit pas figer le worker
-          // (le lease expire pendant ce temps → job running à vie)
-          console.warn(
-            `[discover] rate-limit (Retry-After ${e.retryAfterSeconds}s) — ` +
-              `tentative ${attempt + 1}/5 après ${Date.now() - startedAt} ms`
-          );
-          await sleep((Math.min(e.retryAfterSeconds, 120) + 5) * 1000);
-          continue;
-        }
-        throw e;
+        const delay = providerRetryDelayMs(e, attempt);
+        if (delay === null || attempt === MAX_PROVIDER_ATTEMPTS - 1) throw e;
+        console.warn(
+          `[discover] incident provider — tentative ${attempt + 1}/${MAX_PROVIDER_ATTEMPTS} ` +
+            `dans ${Math.round(delay / 1000)}s après ${Date.now() - startedAt} ms : ` +
+            `${(e as Error).message.slice(0, 140)}`
+        );
+        await sleep(delay);
       }
     }
     if (!parsed) throw new Error("batch sans résultat après tentatives");

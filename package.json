@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "validate:corpus": "node scripts/validate-phase-1b.mjs",
     "discover": "node scripts/discover.mjs",
-    "eval:phase2a": "node scripts/evaluate-phase-2a.mjs",
+    "eval:phase2a": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/evaluate-phase-2a.mjs",
     "reingest": "node scripts/reingest.mjs",
     "synth": "node scripts/synthesize.mjs",
     "eval:phase5a": "node scripts/evaluate-phase-5a.mjs"

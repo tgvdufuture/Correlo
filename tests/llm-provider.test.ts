@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { GroqProvider } from "@/lib/llm/groq";
+import { LlmNetworkError, LlmTransientError } from "@/lib/llm/errors";
 
 const schema = z.object({
   results: z.array(z.object({ candidate_id: z.number(), claim: z.string() })),
@@ -114,6 +115,68 @@ describe("GroqProvider — mode JSON refusé par le provider", () => {
       provider.chat([{ role: "user", content: "paires" }], schema)
     ).rejects.toThrow(/HTTP 400/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Distinguer « le provider est passagèrement surchargé » de « la configuration est
+ * fausse » : le premier mérite un réessai d'appel (il ne doit pas consommer une
+ * tentative de job), le second doit échouer tout de suite et visiblement.
+ */
+describe("GroqProvider — nature des incidents (réessayable ou définitive)", () => {
+  /** Erreur réellement levée par `chat` pour la réponse simulée. */
+  async function errorFor(response: () => Promise<Response>): Promise<Error> {
+    vi.stubGlobal("fetch", vi.fn(response));
+    const provider = new GroqProvider({ apiKey: "k", model: "m" });
+    return provider.chat([{ role: "user", content: "paires" }], schema).then(
+      () => new Error("aucune erreur levée"),
+      (e: Error) => e
+    );
+  }
+
+  it("503 « Service temporarily overloaded » → incident passager", async () => {
+    const err = await errorFor(async () =>
+      new Response(JSON.stringify({ error: { message: "Service temporarily overloaded" } }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    expect(err).toBeInstanceOf(LlmTransientError);
+  });
+
+  it("timeout de l'échange → incident passager", async () => {
+    const err = await errorFor(async () => {
+      const abort = new Error("This operation was aborted");
+      abort.name = "AbortError";
+      throw abort;
+    });
+    expect(err).toBeInstanceOf(LlmTransientError);
+  });
+
+  it("connexion coupée en cours d'échange → incident passager", async () => {
+    const err = await errorFor(async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } });
+    });
+    expect(err).toBeInstanceOf(LlmTransientError);
+  });
+
+  it("404 de modèle inconnu → erreur définitive (pas de réessai)", async () => {
+    const err = await errorFor(async () =>
+      new Response(JSON.stringify({ error: { message: "model not found" } }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    expect(err).toBeInstanceOf(LlmNetworkError);
+    expect(err).not.toBeInstanceOf(LlmTransientError);
+  });
+
+  it("hôte inexistant (ENOTFOUND) → erreur définitive", async () => {
+    const err = await errorFor(async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND" } });
+    });
+    expect(err).toBeInstanceOf(LlmNetworkError);
+    expect(err).not.toBeInstanceOf(LlmTransientError);
   });
 });
 

@@ -8,6 +8,7 @@ import {
   LlmNetworkError,
   LlmOutputError,
   LlmRateLimitError,
+  LlmTransientError,
 } from "@/lib/llm/errors";
 
 /** Endpoint par défaut : API Groq (OpenAI-compatible). */
@@ -104,6 +105,14 @@ export class GroqProvider implements LlmProvider {
               `${this.label} a refusé la génération JSON [modèle « ${this.opts.model} »] : ${detail}`
             );
           }
+          // incident passager du provider (502/503 « Service temporarily overloaded »,
+          // 504, 408) : réessayable au niveau de l'appel, contrairement à un 404 de
+          // modèle inconnu ou à un 400 de requête mal formée (cf. LlmTransientError)
+          if (res.status >= 500 || res.status === 408) {
+            throw new LlmTransientError(
+              `${this.label} HTTP ${res.status} [modèle « ${this.opts.model} » sur ${this.baseUrl}] : ${detail}`
+            );
+          }
           throw new LlmNetworkError(
             `${this.label} HTTP ${res.status} [modèle « ${this.opts.model} » sur ${this.baseUrl}] : ${detail}`
           );
@@ -114,13 +123,20 @@ export class GroqProvider implements LlmProvider {
       } catch (e) {
         if (e instanceof LlmError) throw e;
         if ((e as Error).name === "AbortError") {
-          throw new LlmNetworkError(`${this.label} ne répond pas (timeout ${this.timeoutMs / 1000}s)`);
+          // timeout : le provider a répondu trop lentement (constaté : latences 25–250 s
+          // et jusqu'à > 300 s sur un provider gratuit saturé) — passager par nature
+          throw new LlmTransientError(`${this.label} ne répond pas (timeout ${this.timeoutMs / 1000}s)`);
         }
         // la cause (ECONNRESET, UND_ERR_*, …) est indispensable au diagnostic :
         // « fetch failed » seul ne dit pas si c'est un DNS, un reset ou un timeout
-        throw new LlmNetworkError(
-          `${this.label} injoignable : ${(e as Error).message}${causeSuffix(e)}`
-        );
+        // connexion coupée en cours d'échange (reset, socket, DNS temporairement
+        // indisponible) : passager ; un hôte inexistant ou un service éteint
+        // (ENOTFOUND, ECONNREFUSED) reste une erreur franche, visible tout de suite
+        const causeCode = (e as { cause?: { code?: string } }).cause?.code ?? "";
+        const message = `${this.label} injoignable : ${(e as Error).message}${causeSuffix(e)}`;
+        throw (TRANSIENT_CAUSE_CODES.has(causeCode)
+          ? new LlmTransientError(message)
+          : new LlmNetworkError(message));
       } finally {
         clearTimeout(timer);
       }
@@ -180,6 +196,23 @@ const CHAT_TIMEOUT_MS = 300_000;
 
 /** Plafond du budget de sortie quand on rejoue une réponse tronquée. */
 const MAX_TOKENS_CEILING = 8_192;
+
+/**
+ * Codes de cause d'une erreur `fetch` qui signalent une coupure **passagère** de la
+ * connexion. `ENOTFOUND` (nom d'hôte inexistant) et `ECONNREFUSED` (service éteint) en
+ * sont volontairement absents : ce sont des erreurs de configuration, qu'il vaut mieux
+ * voir tout de suite plutôt que de les réessayer cinq fois.
+ */
+const TRANSIENT_CAUSE_CODES = new Set([
+  "ECONNRESET",
+  "EPIPE",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+]);
 
 /** Cause racine d'une erreur fetch (code undici / errno), pour le diagnostic. */
 function causeSuffix(e: unknown): string {

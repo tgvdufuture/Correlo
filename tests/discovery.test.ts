@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { z } from "zod";
 import { makeFragment, makeTestDb, makeTextSource, makeFakeEmbedder } from "./helpers";
+import { LlmTransientError } from "@/lib/llm/errors";
 import { DiscoveryService } from "@/lib/discover/discovery-service";
 import { DISCOVERY_PROMPT_VERSION } from "@/lib/discover/prompts";
 import { createSuggestionsRepo } from "@/lib/repositories/suggestions";
@@ -124,6 +125,8 @@ describe("découverte (pipeline Phase 2A)", () => {
       causeSideMissing: 1,
       invalidEntry: 0,
       claimRejected: 0,
+      claimAnchored: 0,
+      claimJuxtaposed: 0,
       nearDuplicate: 0,
     });
 
@@ -309,9 +312,207 @@ describe("découverte (pipeline Phase 2A)", () => {
     // 3 refus de forme (générique, placeholder, anglais) + 1 quasi-doublon, 2 retenus
     expect(result.skipped.claimRejected).toBe(3);
     expect(result.skipped.nearDuplicate).toBe(1);
+    expect(result.skipped.claimAnchored).toBe(0);
+    expect(result.skipped.claimJuxtaposed).toBe(0);
     expect(result.created).toHaveLength(2);
     const stored = db.prepare("SELECT COUNT(*) AS n FROM suggestions").get() as { n: number };
     expect(stored.n).toBe(2);
+  });
+
+  /**
+   * Ancrage lexical (défaut 2, mesuré par `measure-2a-v2` : 13/39 suggestions du run
+   * du 2026-09-14). Le modèle fabrique le mot-clé qui relie les deux textes — la
+   * connexion devient trouvable par recherche par mots-clés, donc évidente au sens
+   * de Q22. La règle est celle de l'évaluateur (`lib/quality/lexical-anchor.ts`).
+   */
+  it("barrière d'ancrage lexical : rejette une connexion portée par un mot rare partagé", async () => {
+    const { db } = makeTestDb();
+    // une seule racine (« recommand ») des deux côtés, sous deux formes distinctes :
+    // la v1 (termes rares *identiques*) ne voit rien, la v2 (racine) si
+    const s1 = makeTextSource(db, "Maitre et eleve.", "Source un");
+    const s2 = makeTextSource(db, "Lettres et professeur.", "Source deux");
+    for (let i = 0; i < 6; i++) {
+      makeFragment(db, {
+        sourceId: s1,
+        chunkIndex: i,
+        text: `Le maitre recommande un nouvel eleve ${i} au professeur. `.repeat(20),
+        vector: [0.9 - i * 0.02, 0.1 + i * 0.01, 0, 0, 0, 0, 0, 0],
+      });
+      makeFragment(db, {
+        sourceId: s2,
+        chunkIndex: i,
+        text: `Des lettres de recommandations ${i} arrivent pour le professeur. `.repeat(20),
+        vector: [0.1, 0.8 - i * 0.02, 0, 0, 0, 0, 0, 0],
+      });
+    }
+
+    const anchored = "Un eleve est confie sur recommandation au maitre de la classe.";
+    const llm = new (class extends FakeDiscoveryLlm {
+      async chat<T extends z.ZodType>(messages: ChatMessage[], schema: T): Promise<z.infer<T>> {
+        this.calls += 1;
+        const user = messages.find((m) => m.role === "user")?.content ?? "";
+        const count = (user.match(/--- Paire /g) ?? []).length;
+        const fragments = [...user.matchAll(/<fragment>\n([\s\S]*?)\n<\/fragment>/g)].map(
+          (m) => m[1]
+        );
+        const results = [];
+        for (let i = 0; i < count; i++) {
+          results.push({
+            candidate_id: i,
+            claim:
+              i === 0
+                ? anchored
+                : fakeClaimFromPair(fragments[2 * i] ?? "", fragments[2 * i + 1] ?? ""),
+            relation_type: "analogy",
+            tier: "medium",
+            epistemic_status: "INFERENCE",
+          });
+        }
+        return schema.parse({ results });
+      }
+    })();
+    const service = new DiscoveryService({
+      db,
+      suggestions: createSuggestionsRepo(db),
+      chat: llm,
+      chatModel: "test-model",
+    });
+    const result = await service.run([s1, s2], {
+      runId: "run-ancre",
+      sampler: "diversified",
+      maxPairs: 6,
+      batchSize: 6,
+    });
+
+    expect(result.skipped.claimAnchored).toBe(1);
+    expect(result.created).toHaveLength(5);
+    const stored = db
+      .prepare("SELECT COUNT(*) AS n FROM suggestions WHERE claim = ?")
+      .get(anchored) as { n: number };
+    expect(stored.n).toBe(0);
+  });
+
+  /**
+   * Juxtaposition (défaut 1, mesuré sur `discovery-v4` : le patron dominant de la
+   * production était « X dit A, tandis que Y dit B », que les marqueurs génériques
+   * ne capturaient pas). La barrière doit couper la coordination vide avant
+   * l'insertion, comme pour l'ancrage.
+   */
+  it("barrière de juxtaposition : rejette deux attributions coordonnées sans relation", async () => {
+    const { db } = makeTestDb();
+    const s1 = makeTextSource(db, "Methode experimentale.", "Source un");
+    const s2 = makeTextSource(db, "Discours et geometrie.", "Source deux");
+    for (let i = 0; i < 6; i++) {
+      makeFragment(db, {
+        sourceId: s1,
+        chunkIndex: i,
+        text: `Le vivisection du vivant ${i} etablit le determinisme experimental. `.repeat(20),
+        vector: [0.9 - i * 0.02, 0.1 + i * 0.01, 0, 0, 0, 0, 0, 0],
+      });
+      makeFragment(db, {
+        sourceId: s2,
+        chunkIndex: i,
+        text: `La geometrie et l algebre eclairent la physique ${i} du mouvement. `.repeat(20),
+        vector: [0.1, 0.8 - i * 0.02, 0, 0, 0, 0, 0, 0],
+      });
+    }
+
+    const juxtaposed =
+      "Bernard considere la vivisection comme methode du vivant, tandis que Descartes examine le mecanisme du mouvement par la geometrie.";
+    const llm = new (class extends FakeDiscoveryLlm {
+      async chat<T extends z.ZodType>(messages: ChatMessage[], schema: T): Promise<z.infer<T>> {
+        this.calls += 1;
+        const user = messages.find((m) => m.role === "user")?.content ?? "";
+        const count = (user.match(/--- Paire /g) ?? []).length;
+        const fragments = [...user.matchAll(/<fragment>\n([\s\S]*?)\n<\/fragment>/g)].map(
+          (m) => m[1]
+        );
+        const results = [];
+        for (let i = 0; i < count; i++) {
+          results.push({
+            candidate_id: i,
+            claim:
+              i === 0
+                ? juxtaposed
+                : fakeClaimFromPair(fragments[2 * i] ?? "", fragments[2 * i + 1] ?? ""),
+            relation_type: "analogy",
+            tier: "medium",
+            epistemic_status: "INFERENCE",
+          });
+        }
+        return schema.parse({ results });
+      }
+    })();
+    const service = new DiscoveryService({
+      db,
+      suggestions: createSuggestionsRepo(db),
+      chat: llm,
+      chatModel: "test-model",
+    });
+    const result = await service.run([s1, s2], {
+      runId: "run-juxtaposition",
+      sampler: "diversified",
+      maxPairs: 6,
+      batchSize: 6,
+    });
+
+    expect(result.skipped.claimJuxtaposed).toBe(1);
+    expect(result.created).toHaveLength(5);
+    const stored = db
+      .prepare("SELECT COUNT(*) AS n FROM suggestions WHERE claim = ?")
+      .get(juxtaposed) as { n: number };
+    expect(stored.n).toBe(0);
+  });
+
+  /**
+   * Incident réel (2026-09-14, NVIDIA NIM) : sur un run de validation de 12 batchs,
+   * un `503 Service temporarily overloaded` et un timeout 300 s ont consommé **2 des
+   * 5 tentatives du job en 4 batchs** — le run ne pouvait pas finir. Un incident
+   * passager du provider ne doit coûter ni une paire, ni une tentative de job : il se
+   * réessaie au niveau de l'appel (même principe que le 429 déjà géré).
+   */
+  it("incident passager du provider : le batch est réessayé, aucune paire perdue", async () => {
+    const { db } = makeTestDb();
+    const sourceIds = buildCorpus(db);
+    class FlakyLlm extends FakeDiscoveryLlm {
+      failuresLeft = 2;
+      async chat<T extends z.ZodType>(messages: ChatMessage[], schema: T): Promise<z.infer<T>> {
+        if (this.failuresLeft > 0) {
+          this.failuresLeft -= 1;
+          throw new LlmTransientError("HTTP 503 — Service temporarily overloaded");
+        }
+        return super.chat(messages, schema);
+      }
+    }
+    const llm = new FlakyLlm();
+    const service = new DiscoveryService({
+      db,
+      suggestions: createSuggestionsRepo(db),
+      chat: llm,
+      chatModel: "test-model",
+    });
+
+    // les réessais sont espacés (backoff ~2 s puis ~4 s) : horloge simulée, sinon le
+    // test paierait réellement l'attente
+    vi.useFakeTimers();
+    let result: Awaited<ReturnType<DiscoveryService["run"]>>;
+    try {
+      const pending = service.run(sourceIds, {
+        runId: "run-instabilite",
+        sampler: "diversified",
+        maxPairs: 8,
+        batchSize: 8,
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      result = await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(llm.failuresLeft).toBe(0); // les deux incidents ont bien eu lieu
+    expect(result.created).toHaveLength(7); // candidate 5 : cause sans sens → ignorée
+    // un seul batch réellement facturé : les réessais ne comptent pas comme des appels
+    expect(result.batchCalls).toBe(1);
   });
 });
 
