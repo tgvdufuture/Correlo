@@ -183,6 +183,47 @@ describe("découverte (pipeline Phase 2A)", () => {
   });
 
   /**
+   * `seed` imposée : rejouer la **sélection** d'un run archivé sous un identifiant
+   * neuf, sans écraser la ligne `discover_runs` du run d'origine. C'est ce qui permet
+   * de comparer deux corpus (deux espaces vectoriels) à échantillon identique : la
+   * seed seule décide de l'ordre des tirages PRNG et du k-means.
+   */
+  it("seed imposée : même sélection sous un autre run_id, seed persistée telle quelle", async () => {
+    const { sourceIds, service } = makeDiscovery();
+    const seed = "a".repeat(64);
+    const first = await service.run(sourceIds, {
+      runId: "archived",
+      seed,
+      sampler: "diversified",
+      maxPairs: 8,
+      batchSize: 10,
+    });
+    expect(first.seed).toBe(seed);
+    // même seed, run_id différent : mêmes paires donc mêmes prompts donc mêmes claims
+    // → tout retombe en « duplicate », aucune suggestion nouvelle
+    const replay = await service.run(sourceIds, {
+      runId: "rejoué",
+      seed,
+      sampler: "diversified",
+      maxPairs: 8,
+      batchSize: 10,
+    });
+    expect(replay.seed).toBe(seed);
+    expect(replay.pairsTotal).toBe(first.pairsTotal);
+    expect(replay.createdIds).toEqual(first.createdIds);
+    expect(replay.skipped.duplicate).toBe(7);
+    // sans seed imposée, l'identité est dérivée du run_id (comportement inchangé)
+    const derived = await service.run(sourceIds, {
+      runId: "rejoué",
+      sampler: "diversified",
+      maxPairs: 8,
+      batchSize: 10,
+    });
+    expect(derived.seed).not.toBe(seed);
+    expect(derived.seed).toBe(sha256Hex(`${derived.corpusHash}|rejoué`));
+  });
+
+  /**
    * AC1, cœur du « rejouable à l'identique » : un rejeu doit reconstruire le
    * **contexte** du run (les claims déjà retenus), pas seulement retrouver les
    * mêmes paires. Le LLM factice rend ici un claim qui dépend du prompt entier :

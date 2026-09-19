@@ -1,3 +1,4 @@
+import { getConfig } from "@/lib/config/env";
 import { getDb } from "@/lib/db/client";
 import {
   getChatModelName,
@@ -11,11 +12,16 @@ import { createFragmentsRepo } from "@/lib/repositories/fragments";
 import { backoffDelayMs, MAX_ATTEMPTS, type ClaimedJob, type JobsRepo, createJobsRepo } from "@/lib/repositories/jobs";
 import { IngestService, JobStolenError, type IngestDeps } from "@/lib/ingest/ingest-service";
 import { EmbeddingService } from "@/lib/ingest/embedding-service";
+import { reembedCorpus, type ReembedOptions, type ReembedResult } from "@/lib/ingest/reembed-service";
 import { SummaryService } from "@/lib/ingest/summary-service";
 import { DiscoveryService } from "@/lib/discover/discovery-service";
+import { SAMPLER_VERSION } from "@/lib/discover/sampler";
+import { DISCOVERY_PROMPT_VERSION } from "@/lib/discover/prompts";
 import { createDiscoverRunsRepo, type DiscoverRunsRepo } from "@/lib/repositories/discover-runs";
 import { createSuggestionsRepo } from "@/lib/repositories/suggestions";
 import { SynthesisService, type SynthesisRunResult } from "@/lib/synth/synth-service";
+import { InvestigationService } from "@/lib/agent/investigation-service";
+import { createInvestigationsRepo } from "@/lib/repositories/investigations";
 import { createThemesRepo } from "@/lib/repositories/themes";
 import { createSynthesesRepo } from "@/lib/repositories/syntheses";
 import { createPromptCache } from "@/lib/repositories/llm-cache";
@@ -35,8 +41,23 @@ export interface WorkerDeps {
   discoverRuns?: DiscoverRunsRepo;
   /** Kind synthesize (Phase 5A) — optionnel pour les tests existants. */
   synthesize?: SynthesisService;
+  /** Kind reembed (re-vectorisation du corpus) — optionnel pour les tests existants. */
+  reembed?: ReembedRunner;
+  /** Kind investigation (Phase 4, US-09) — optionnel pour les tests existants. */
+  investigation?: InvestigationService;
   maxAttempts?: number;
   concurrency?: number;
+}
+
+/**
+ * Capacité de re-vectorisation telle que le worker la consomme.
+ *
+ * Une interface (et non l'appel direct à `reembedCorpus`) pour que le worker reste
+ * testable sans base ni réseau : un test fournit un objet qui expose `run`. Le vrai
+ * câblage est dans `createWorker`. 
+ */
+export interface ReembedRunner {
+  run(opts: ReembedOptions): Promise<ReembedResult>;
 }
 
 /**
@@ -90,6 +111,12 @@ export class Worker {
       } else if (job.kind === "synthesize") {
         if (!this.deps.synthesize) throw new Error("kind synthesize non câblé");
         await this.runSynthesize(job, this.deps.synthesize);
+      } else if (job.kind === "reembed") {
+        if (!this.deps.reembed) throw new Error("kind reembed non câblé");
+        await this.runReembed(job, this.deps.reembed);
+      } else if (job.kind === "investigation") {
+        if (!this.deps.investigation) throw new Error("kind investigation non câblé");
+        await this.runInvestigation(job, this.deps.investigation);
       } else throw new Error(`kind de job inconnu : ${job.kind}`);
     } catch (err) {
       if (err instanceof JobStolenError) return; // lease repris ailleurs : ne rien écrire
@@ -131,11 +158,14 @@ export class Worker {
       run_id: string;
       source_ids: string[];
       sampler?: "diversified" | "top6";
+      focus_source_ids?: string[];
       max_pairs?: number;
       max_pairs_per_source?: number;
       batch_size?: number;
       max_fragment_chars?: number;
       inter_batch_delay_ms?: number;
+      /** Seed imposée (rejeu d'un run archivé sous un identifiant neuf). */
+      seed?: string;
     };
     if (!Array.isArray(payload.source_ids) || payload.source_ids.length === 0) {
       throw new Error("payload discover invalide : source_ids requis");
@@ -172,7 +202,9 @@ export class Worker {
     try {
       result = await discover.run(payload.source_ids, {
         runId: payload.run_id,
+        seed: payload.seed,
         sampler: payload.sampler ?? "diversified",
+        focusSources: payload.focus_source_ids,
         maxPairs: payload.max_pairs,
         maxPairsPerSource: payload.max_pairs_per_source,
         batchSize: payload.batch_size,
@@ -388,6 +420,130 @@ export class Worker {
       throw new JobStolenError();
     }
   }
+
+  /**
+   * Job investigation (Phase 4, US-09) : un agent, ≤ 5 étapes, citations vérifiées.
+   *
+   * Pas de checkpoint : le run est **court** (≤ 5 appels) et le cache de prompt rend un
+   * rejeu gratuit et identique — la reprise au checkpoint existe en 2A/5A parce que ces
+   * runs durent des dizaines de minutes, ce qui n'est pas le cas ici. L'`id` de
+   * l'investigation est celui du job : un rejeu met à jour la ligne au lieu d'en créer
+   * une seconde (colonne `job_id` inexistante dans le schéma verrouillé).
+   */
+  private async runInvestigation(job: ClaimedJob, service: InvestigationService): Promise<void> {
+    const payload = JSON.parse(job.payload) as {
+      suggestion_id: string;
+      max_steps?: number;
+      page_size?: number;
+      catalogue_size?: number;
+      max_fragment_chars?: number;
+    };
+    if (!payload.suggestion_id) {
+      throw new Error("payload investigation invalide : suggestion_id requis");
+    }
+    // lease renouvelé : même court, le run enchaîne plusieurs appels LLM lents
+    const leaseTimer = setInterval(() => {
+      this.deps.jobs.renewLease(job.id, job.lease_token as string);
+    }, 30_000);
+    let result: Awaited<ReturnType<InvestigationService["run"]>>;
+    try {
+      result = await service.run(payload.suggestion_id, {
+        investigationId: job.id,
+        maxSteps: payload.max_steps,
+        pageSize: payload.page_size,
+        catalogueSize: payload.catalogue_size,
+        maxFragmentChars: payload.max_fragment_chars,
+      });
+    } finally {
+      clearInterval(leaseTimer);
+    }
+    const summary = {
+      investigation_id: result.investigationId,
+      suggestion_id: payload.suggestion_id,
+      status: result.status,
+      steps: result.steps,
+      llm_calls: result.llmCalls,
+      llm_calls_from_cache: result.llmCallsFromCache,
+      citations: result.citations,
+      failure: result.failure,
+    };
+    this.deps.jobs.updateCheckpoint(
+      job.id,
+      job.lease_token as string,
+      JSON.stringify({ done: true }),
+      JSON.stringify(summary)
+    );
+    // Une enquête qui n'a pas conclu est un résultat, pas une panne : le job est
+    // `done` et le statut réel vit dans `investigations.status` (l'erreur du job,
+    // elle, est réservée aux pannes — suggestion disparue, provider en échec).
+    if (!this.deps.jobs.complete(job.id, job.lease_token as string)) {
+      throw new JobStolenError();
+    }
+  }
+
+  /**
+   * Job reembed : re-vectorise le corpus dans l'espace **actif** (bascule de
+   * connecteur d'embeddings Ollama ↔ API).
+   *
+   * Les compteurs vont dans `progress_json` (ce que suit `npm run reembed`) et le
+   * **diagnostic** — espaces avant/après, fragments sautés — dans le résumé final :
+   * c'est lui qui distingue « le corpus est passé à 2 048 dims » de « le job a
+   * tourné mais le provider a rendu autre chose ». Un échec au milieu laisse le
+   * corpus exploitable (une transaction par lot) et le job reprend au lot suivant
+   * grâce au filtre de saut, sans intervention.
+   */
+  private async runReembed(job: ClaimedJob, reembed: ReembedRunner): Promise<void> {
+    const payload = JSON.parse(job.payload) as {
+      force?: boolean;
+      source_ids?: string[];
+      batch_size?: number;
+    };
+    // lease renouvelé : une re-vectorisation du corpus complet dure plusieurs minutes
+    const leaseTimer = setInterval(() => {
+      this.deps.jobs.renewLease(job.id, job.lease_token as string);
+    }, 30_000);
+    let result: ReembedResult;
+    try {
+      result = await reembed.run({
+        force: payload.force === true,
+        sourceIds: payload.source_ids,
+        batchSize: payload.batch_size,
+        shouldStop: () => this.stopped,
+        onProgress: (info) => {
+          this.deps.jobs.updateCheckpoint(
+            job.id,
+            job.lease_token as string,
+            JSON.stringify({ done_batches: info.batches }),
+            JSON.stringify({
+              processed: info.processed,
+              total: info.total,
+              batches: info.batches,
+            })
+          );
+        },
+      });
+    } finally {
+      clearInterval(leaseTimer);
+    }
+    const summary = {
+      space: result.space,
+      from: result.from,
+      to: result.to,
+      candidates: result.candidates,
+      processed: result.processed,
+      batches: result.batches,
+      skipped: result.skipped,
+    };
+    this.deps.jobs.updateCheckpoint(
+      job.id,
+      job.lease_token as string,
+      JSON.stringify({ done: true }),
+      JSON.stringify(summary)
+    );
+    if (!this.deps.jobs.complete(job.id, job.lease_token as string)) {
+      throw new JobStolenError();
+    }
+  }
 }
 
 /** `run_id` d'un payload discover (payload illisible ⇒ undefined, jamais d'exception ici). */
@@ -423,6 +579,7 @@ export function createWorker(): Worker {
   const jobs = createJobsRepo(db);
   const llm = getLlm();
   const embedder = new EmbeddingService(llm, embeddingMeta());
+  const config = getConfig();
   const ingestDeps: IngestDeps = {
     db,
     sources,
@@ -430,6 +587,19 @@ export function createWorker(): Worker {
     jobs,
     embedder,
     chatModel: getChatModelName(),
+    // Découverte automatique après dépôt : l'ingestion d'un fichier rend ses liens
+    // possibles, donc c'est elle qui déclenche le run — focalisé sur le fichier.
+    discover: {
+      enabled: config.AUTO_DISCOVER === "on",
+      chatModel: getChatModelName(),
+      samplerVersion: SAMPLER_VERSION,
+      promptVersion: DISCOVERY_PROMPT_VERSION,
+      maxPairs: config.AUTO_DISCOVER_MAX_PAIRS,
+      maxPairsPerSource: config.AUTO_DISCOVER_MAX_PAIRS_PER_SOURCE,
+      batchSize: config.AUTO_DISCOVER_BATCH_SIZE,
+      maxFragmentChars: config.AUTO_DISCOVER_MAX_FRAGMENT_CHARS,
+      interBatchDelayMs: config.AUTO_DISCOVER_INTER_BATCH_DELAY_MS,
+    },
   };
   const ingest = new IngestService(ingestDeps);
   const summary = new SummaryService({
@@ -465,5 +635,37 @@ export function createWorker(): Worker {
     chatSignature,
     promptCache,
   });
-  return new Worker({ jobs, ingest, summary, discover, discoverRuns, synthesize });
+  // Investigation (Phase 4) : même cache de prompt que 2A/5A — un rejeu de la même
+  // question ne rappelle pas le modèle, donc les étapes enregistrées restent celles
+  // du premier passage (et non une reformulation).
+  const investigation = new InvestigationService({
+    db,
+    investigations: createInvestigationsRepo(db),
+    suggestions: createSuggestionsRepo(db),
+    fragments,
+    sources,
+    chat: llm,
+    chatModel: getChatModelName(),
+    chatSignature,
+    promptCache,
+  });
+  // Re-vectorisation : le worker porte le même `embedder` que l'ingestion, donc la
+  // bascule se fait dans l'espace exact que les prochains dépôts utiliseront.
+  const reembed: ReembedRunner = {
+    run: (opts) =>
+      reembedCorpus(db, embedder, {
+        batchSize: config.NVIDIA_EMBED_BATCH_SIZE,
+        ...opts,
+      }),
+  };
+  return new Worker({
+    jobs,
+    ingest,
+    summary,
+    discover,
+    discoverRuns,
+    synthesize,
+    reembed,
+    investigation,
+  });
 }

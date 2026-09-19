@@ -7,7 +7,9 @@ import { dotProduct, kMeansVectors, mulberry32 } from "@/lib/cluster/kmeans";
  *  - cross-source uniquement (fragment_a.source_id != fragment_b.source_id) ;
  *  - diversified : top-3 cosine + 2 fragments de clusters distincts + 1 lointain ;
  *  - top6 : les 6 plus proches (baseline « top-6 cosine pur », même budget) ;
- *  - quotas : ≤ 20 paires émises par source, ≤ 200 paires par run.
+ *  - quotas : ≤ 20 paires émises par source, ≤ 200 paires par run ;
+ *  - `focusSourceIds` : les sources à examiner **en premier** (dépôt d'un fichier =
+ *    on cherche ses liens, pas ceux du corpus entier).
  *
  * Le PRNG et le k-means vivent dans lib/cluster/kmeans.ts (partagés avec les thèmes
  * de la Phase 5A) ; mulberry32 reste ré-exporté ici, son comportement étant contractuel.
@@ -22,8 +24,14 @@ export { mulberry32 };
  * quotas, ordre d'itération) : un run dont la version diffère ne décrit plus le
  * même échantillon, donc n'est plus « rejouable à l'identique » — c'est ce que la
  * colonne permet de détecter, elle qui accompagne la seed rejouée.
+ *
+ * `sampler-v2` (2026-09-16) : ordre d'itération « sources examinées d'abord »
+ * (`focusSourceIds`). Un run focalisé sur un fichier échantillonne **ses** paires
+ * au lieu des premières sources par ordre alphabétique — sans ce changement, le
+ * plafond global était consommé par d'autres documents et le fichier fraîchement
+ * déposé n'était jamais examiné.
  */
-export const SAMPLER_VERSION = "sampler-v1";
+export const SAMPLER_VERSION = "sampler-v2";
 
 export interface DiscoveryFragment {
   id: string;
@@ -50,6 +58,13 @@ export interface SampleOptions {
   maxPairsPerSource?: number;
   topK?: number;
   clusterCount?: number;
+  /**
+   * Sources examinées en premier (itération). Elles passent devant l'ordre
+   * alphabétique : un dépôt de fichier trouve donc ses liens même quand le
+   * plafond de paires est petit — et le reste du corpus est échantillonné
+   * seulement si le budget n'est pas épuisé.
+   */
+  focusSourceIds?: string[];
 }
 
 /** Seed déterministe du run : SHA256(corpus_hash | run_id). */
@@ -68,10 +83,15 @@ export function samplePairs(opts: SampleOptions): PairCandidate[] {
   const topK = opts.topK ?? (opts.sampler === "top6" ? 6 : 3);
   const rng = mulberry32(parseInt(opts.seedHex.slice(0, 8), 16) || 1);
 
-  // ordre d'itération déterministe
-  const ordered = [...opts.fragments].sort(
-    (x, y) => x.sourceId.localeCompare(y.sourceId) || x.chunkIndex - y.chunkIndex
-  );
+  // ordre d'itération déterministe : sources mises en avant d'abord, puis
+  // (source_id, chunk_index) — un ordre total, donc une sélection reproductible
+  const focus = new Set(opts.focusSourceIds ?? []);
+  const byNatural = (x: DiscoveryFragment, y: DiscoveryFragment) =>
+    x.sourceId.localeCompare(y.sourceId) || x.chunkIndex - y.chunkIndex;
+  const ordered = [
+    ...opts.fragments.filter((f) => focus.has(f.sourceId)).sort(byNatural),
+    ...opts.fragments.filter((f) => !focus.has(f.sourceId)).sort(byNatural),
+  ];
   if (ordered.length < 2) return [];
 
   const dims = ordered[0].embedding.length;

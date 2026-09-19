@@ -1,22 +1,37 @@
 # Sérendipité — moteur de connexions personnel
 
 Application web locale (Next.js) où vous déposez des sources (texte, PDF, URL).
-Le système les découpe en fragments (~2 000 caractères), les indexe via des
-embeddings **locaux** (Ollama), puis découvrira des connexions non évidentes
-entre fragments (analogie, contradiction, cause).
+Le système les découpe en fragments (~2 000 caractères), les indexe par embeddings
+— **locaux** (Ollama) ou par **connecteur API** (`EMBED_PROVIDER=api`) — puis
+découvre des connexions non évidentes entre fragments (analogie, contradiction, cause).
 
-**Positionnement : local-first.** Les embeddings sont toujours calculés en local
-(Ollama). Le chat ne part vers Groq que si vous gardez la configuration par défaut
-(`LLM_CHAT_PROVIDER=groq`) ; basculez sur `ollama` pour rester 100 % hors ligne.
+**Positionnement : local-first par défaut.** Les embeddings sont calculés en local
+(Ollama) tant que `EMBED_PROVIDER=ollama` ; le connecteur API existe pour se passer
+d'un Ollama en marche, il envoie alors le texte des fragments au service configuré.
+Le chat ne part vers un endpoint distant que si vous le configurez (`LLM_CHAT_PROVIDER`)
+— basculez sur `ollama` pour rester 100 % hors ligne.
 
-> État actuel : **Phase 1A** (ingestion TEXT/PDF/URL, chunker-v1, embeddings
-> Ollama, file de jobs asynchrone avec reprise, bibliothèque). Les phases
-> découverte/feed/canvas (1B–4) ne sont pas implémentées.
+> **L'espace vectoriel est un réglage du corpus.** Les vecteurs d'Ollama (768 dims) et
+> ceux du connecteur API (2048 dims) ne sont pas comparables. Changer `EMBED_PROVIDER`
+> sans re-vectoriser laisse deux espaces en base : l'analyse **refuse** alors de les
+> comparer (bandeau sur l'atelier) au lieu de produire des liens faux. `npm run reembed`
+> remet le corpus dans l'espace actif — **la même commande dans les deux sens**.
+
+> État actuel : **1A** ingestion · **1B** validation corpus réel · **2A** PoC de
+> découverte (jalon bloquant, verdict PASS) · **2B** moteur discover persistant ·
+> **5A** moteur de synthèses · **3** complète (feed de connexions, Constructions,
+> STALE, canvas libre avec groupes et cadres, **atelier** : le canvas est
+> l'écran d'entrée et porte les **fichiers**, leurs **liens** et les Constructions) ·
+> **4** investigation : un agent borné à 5 étapes approfondit une connexion en
+> explorant le corpus, et **chaque citation est revérifiée en base** avant d'être
+> affichée (« Investiguer » sur une carte du feed ou un lien de l'atelier).
+> Restent : les phases **5B**/**6** (feed de synthèses, conversation).
 
 ## Prérequis
 
 - Node.js ≥ 20 (testé sur Node 24)
-- [Ollama](https://ollama.com) installé et lancé, avec le modèle d'embedding :
+- [Ollama](https://ollama.com) installé et lancé, avec le modèle d'embedding —
+  **seulement** si `EMBED_PROVIDER=ollama` (le défaut) :
 
 ```bash
 ollama pull nomic-embed-text
@@ -33,7 +48,7 @@ ollama pull llama3.3
 ```bash
 npm install
 cp .env.example .env.local   # puis ajuster
-npm run dev                  # http://localhost:3000/sources
+npm run dev                  # http://localhost:3000/ (l'atelier)
 ```
 
 ## Variables d'environnement (`.env.local`)
@@ -45,12 +60,51 @@ npm run dev                  # http://localhost:3000/sources
 | `GROQ_API_KEY` | — | Requise uniquement si `LLM_CHAT_PROVIDER=groq` |
 | `GROQ_CHAT_MODEL` | `qwen/qwen3.8-27b` | Modèle de chat Groq (le défaut historique `llama-3.3-70b-versatile` n'existe plus chez Groq) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Serveur Ollama local |
-| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Modèle d'embeddings (toujours local, 768 dims) |
+| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Modèle d'embeddings local (768 dims) |
 | `OLLAMA_CHAT_MODEL` | — | Requis uniquement si `LLM_CHAT_PROVIDER=ollama` |
+| `EMBED_PROVIDER` | `ollama` | `ollama` (local) ou `api` (endpoint OpenAI-compatible `POST /embeddings`) |
+| `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Endpoint d'embeddings si `EMBED_PROVIDER=api` |
+| `NVIDIA_API_KEY` | — | Requise si `EMBED_PROVIDER=api` sur `integrate.api.nvidia.com` |
+| `NVIDIA_EMBED_MODEL` | `nvidia/nemotron-3-embed-1b` | Modèle d'embeddings du connecteur API |
+| `NVIDIA_EMBED_DIMENSIONS` | `2048` | Dimensions **rendues** par le modèle (non négociables : `400` si autre valeur) |
+| `NVIDIA_EMBED_INPUT_TYPE` | `passage` | `passage` (document) \| `query` \| `off` (champ omis) |
+| `NVIDIA_EMBED_BATCH_SIZE` | `32` | Textes par appel d'embeddings (mesuré : 32 en 2,7 s) |
+| `NVIDIA_EMBED_TIMEOUT_SECONDS` | `120` | Timeout d'un lot |
+| `AUTO_DISCOVER` | `on` | `off` = aucune analyse déclenchée par un dépôt (runs à la main) |
+| `AUTO_DISCOVER_MAX_PAIRS` | `12` | Paires du run automatique (le corpus entier coûte des heures) |
+| `AUTO_DISCOVER_MAX_PAIRS_PER_SOURCE` | `12` | Plafond par source dans ce run |
+| `AUTO_DISCOVER_BATCH_SIZE` | `4` | Paires par appel LLM |
+| `AUTO_DISCOVER_MAX_FRAGMENT_CHARS` | `2400` | Troncature des fragments dans le prompt |
+| `AUTO_DISCOVER_INTER_BATCH_DELAY_MS` | `65000` | Pause entre deux lots (fenêtre de quota du provider) |
 
 Sans `GROQ_API_KEY` : l'ingestion et les embeddings fonctionnent ; le résumé de
 source passe en `failed` avec `missing_groq_api_key` (visible dans la
 bibliothèque, relance manuelle après configuration).
+
+## Changer de connecteur d'embeddings (`npm run reembed`)
+
+Un vecteur n'a de sens que dans l'espace qui l'a produit : on ne peut pas comparer un
+vecteur de 768 dims (Ollama) à un vecteur de 2048 dims (connecteur API). La bascule
+se fait donc en **deux temps**, dans les deux sens :
+
+```bash
+# 1) choisir l'espace actif
+#    .env.local : EMBED_PROVIDER=api   (ou ollama pour revenir en 768 dims)
+# 2) redémarrer le serveur, puis re-vectoriser le corpus existant
+npm run dev
+npm run reembed                      # --dry-run pour voir l'ampleur, --force pour tout refaire
+```
+
+Le job `reembed` est **reprenable** (un fragment déjà dans l'espace actif est sauté) et
+**n'écrit qu'un lot à la fois** : le corpus reste exploitable pendant l'opération. Le
+CLI affiche les espaces présents avant/après, et l'atelier porte un bandeau tant que le
+corpus n'est pas aligné sur l'espace actif. Mesuré sur le corpus réel : **3 849
+fragments, 121 lots, ~4 min** avec `nvidia/nemotron-3-embed-1b`.
+
+> ⚠ L'identité persistée d'un run discover (`corpus_hash`, `seed`) ne porte pas l'espace
+> vectoriel : après une re-vectorisation, les similarités et l'échantillon changent, donc
+> un run archivé **n'est plus reproductible à l'identique** même si son identité se
+> recalcule. Relancez le run pour de nouveaux liens.
 
 ## Validation (Phase 1A)
 
@@ -69,10 +123,10 @@ Scénario manuel :
    résumé `terminé` (ou `échec` avec `missing_groq_api_key` sans clé).
 5. Redémarrer pendant une ingestion : le job reprend au checkpoint, aucun doublon.
 
-## Validation (Phases 1B, 2A, 2B)
+## Validation (Phases 1B, 2A, 2B, 3, 4, 5B)
 
-Mêmes prérequis que ci-dessus (corpus réel de `data/corpus_manifest.json`, Ollama pour
-les embeddings, `GROQ_API_KEY` pour le chat) :
+Mêmes prérequis que ci-dessus (corpus réel de `data/corpus_manifest.json`, embeddings —
+Ollama local ou `EMBED_PROVIDER=api` — et `GROQ_API_KEY` pour le chat) :
 
 ```bash
 npm run validate:corpus    # 1B : locators re-slicés, BLOB conformes, ≤ 5 000 fragments
@@ -82,6 +136,73 @@ npm run validate:phase2b   # 2B : identité de run persistée + contraintes §3.
 npm run eval:phase2a       # 2A : rapport + grille des 2 évaluateurs + verdict Q22
 ```
 
+Phase 3 (feed, Constructions, STALE) — le validateur constate l'état produit par
+le **trafic réel** ; il ne rejoue pas l'API lui-même :
+
+```bash
+npm run dev                # puis exercer le feed depuis /suggestions
+npm run validate:phase3    # 1 ligne de feed par paire, US-07, provenance et stale
+```
+
+Phase 4 (investigation) — l'agent explore le corpus **tout seul**, et ses citations
+sont revérifiées à la lecture ; le validateur constate ce que le trafic a produit :
+
+```bash
+npm run dev                        # puis « Investiguer » sur une carte du feed (ou un lien de l'atelier)
+npm run validate:phase4            # ≤ 5 étapes, 1 appel par étape, citations revérifiées en base
+```
+
+Une enquête ne sort **jamais** du corpus : ses deux outils (recherche lexicale,
+voisinage d'embeddings) sont locaux, et le seul appel réseau reste le chat du provider
+configuré. Une suggestion inconnue répond **404** (rien n'est enfilé), et relancer la
+même enquête rejoue la même question depuis le cache de prompt.
+
+Le validateur **re-joue aussi la barrière de conclusion** sur chaque conclusion
+stockée : il affiche l'état d'alors et le verdict d'aujourd'hui, et exige l'accord pour
+un document produit sous la règle courante (`conclusion_rule_version`). Les runs
+antérieurs à la barrière restent donc lisibles, sans être jugés avec une règle qu'ils
+n'ont pas connue.
+
+Phase 5B (synthèses) — le feed est l'écran `/syntheses` : triées par thème puis
+confiance, preuves **citables** (source, locator, texte) et vérifiées à la lecture,
+accepter/rejeter persistant. Le validateur constate ce que la revue a produit :
+
+```bash
+npm run dev                        # puis trancher depuis /syntheses
+npm run validate:phase5b           # feed trié, citations revérifiées, décisions, stale
+```
+
+Une synthèse tranchée **quitte le défaut de lecture** (AC3) et ne revient pas — pas
+plus **reformulée** : la graine dont une synthèse a été jugée est fermée. Une preuve qui
+ne tient plus (source supprimée ou ré-ingérée) arrive **marquée**, jamais servie comme
+une preuve, et le texte copié au moment T reste affichable (AC4). Accepter n'écrit rien
+ailleurs : les Constructions restent le socle paire v1.2 (AC5).
+
+Vérification navigateur (écrans `/syntheses` et panneau d'investigation) : les scripts
+ouvrent les pages dans un Chromium piloté (`playwright-core`, devDependency ; l'exécutable
+est celui déjà présent dans `%LOCALAPPDATA%\ms-playwright` — passer `executablePath` si
+les versions diffèrent) et exercent les parcours réels sur une **copie jetable** de la
+base. La relance d'enquête est servie par le cache de prompt : 0 appel LLM.
+
+```bash
+npm run check:browser:5b              # /syntheses : feed, preuves, décisions, ordre (14/14)
+npm run check:browser:4               # panneau d'investigation (atelier + feed), idempotence (14/14)
+```
+
+L'**atelier** (`/`, l'ancien `/canvas` y redirige) se vérifie à la main : déposer un
+fichier (il se pose **là où il est lâché** et apparaît aussitôt), le déplacer puis
+recharger (la position tient), sélectionner deux fichiers puis « Grouper » et déplacer
+le groupe (les deux suivent, sans double décalage), dissoudre (rien ne bouge), cliquer une
+**arête** (les deux fichiers reliés se mettent en avant, le panneau surligne le lien),
+« Ouvrir les preuves » puis « Intégrer » (la Construction naît **entre les deux
+fichiers**), rejeter avec une raison (l'arête disparaît), double-cliquer un élément
+périmé (provenance et explication).
+
+Un dépôt enchaîne **ingestion → résumé → analyse** : c'est la fin de l'ingestion (qui
+écrit les embeddings) qui met en file le run `discover`, **focalisé sur le fichier
+déposé**, et l'écran relit tout seul tant qu'un job est en attente ou en cours.
+`npm run discover -- --focus=<id1>,<id2>` rejoue ce comportement à la main.
+
 L'identité d'un run discover — `run_id`, `corpus_hash`, `seed`, `sampler_version` — est
 persistée dans la table `discover_runs` (migration 005). Relancer le même `--run-id`
 **rejoue le même run** (mêmes paires, mêmes prompts) au lieu d'en créer un autre.
@@ -90,21 +211,64 @@ persistée dans la table `discover_runs` (migration 005). Relancer le même `--r
 
 - **Base** : SQLite via `better-sqlite3` (WAL, `foreign_keys = ON`), schéma
   verrouillé `migrations/001_v1_2.sql` (PRD §3.3).
-- **LLM** : confiné dans `lib/llm/` — `LlmProvider` (chat configurable +
-  embeddings Ollama), `GroqProvider`, `OllamaChatProvider`, `OllamaProvider`,
-  `HybridProvider`, codec Float32 LE L2-normalisé.
+- **LLM** : confiné dans `lib/llm/` — `LlmProvider` (chat configurable + embeddings
+  configurable), `GroqProvider`, `OllamaChatProvider`, `OllamaProvider` (local),
+  `ApiEmbedProvider` (endpoint OpenAI-compatible), `HybridProvider`, codec Float32
+  LE L2-normalisé.
+- **Espace vectoriel** : `lib/llm/embedding-space.ts` porte l'identité d'un espace
+  (modèle, dimensions, version) et la **détection** de ce que porte la base ;
+  `lib/ingest/reembed-service.ts` la **réparation** (`npm run reembed`, job `reembed`,
+  migration `008`). Découverte et synthèse refusent un corpus multi-espaces
+  (`EmbeddingSpaceMismatchError`) plutôt que de comparer des vecteurs de longueurs
+  différentes — `dotProduct` lirait sinon les `dims` premières valeurs de chaque
+  vecteur et rendrait des similarités fausses mais plausibles.
 - **Ingestion** : `lib/ingest/` — normalisation Q17, chunker-v1
   (2 000 ± 300, min 800 / max 2 400, overlap 300, locators UTF-16), parsers
   (texte / `pdf-parse` / fetch + Readability).
 - **Jobs** : table `jobs` (lease + token + checkpoint + idempotency), worker
   concurrence 1–2, recovery au boot des leases expirés uniquement, backoff +
   jitter, max 5 attempts.
+- **Découverte / revue** : `lib/discover/` — sampler Q20 déterministe, prompt +
+  rattachement serveur des preuves, barrières qualité (`lib/quality/`),
+  `review-service` (feed, acceptation, rejet). `lib/repositories/` porte
+  `themes`, `syntheses`, `discover_runs`, `constructions`.
+- **Investigation** : `lib/agent/` — un **seul** agent borné à 5 étapes (job
+  `investigation`, table `investigations` du schéma v1.2, aucune migration). Il ne
+  dispose que de deux outils **locaux** (recherche lexicale sur le corpus, voisinage
+  d'embeddings en base) : aucune vérification web n'est possible par construction
+  (US-09 AC3). Le modèle **ne voit jamais d'identifiant de fragment** — il cite des
+  indices de catalogue, le serveur rattache — et `lib/agent/citations.ts` vérifie
+  chaque citation (fragment existant, texte identique, source identique) **à chaque
+  lecture** : une étape dont une citation ne tient pas passe `failed` et n'est jamais
+  présentée comme une preuve. Une **barrière de conclusion** (`lib/quality/conclusion.ts`,
+  `conclusion-v2`, partagée avec le validateur) refuse une conclusion qui n'approfondit
+  rien : conclure sans avoir exploré, recopier la question, **juxtaposer** deux reports
+  coordonnés sans énoncer de relation, ou se contenter d'une formule holistique. Un refus
+  consomme l'étape et le modèle peut se reprendre dans le budget restant.
 - **UI** : `app/sources` — import drag & drop + URL, bibliothèque avec statuts,
-  polling léger (3 s), relance manuelle des jobs en échec.
+  polling léger (3 s), relance manuelle des jobs en échec. `app/suggestions` —
+  feed des connexions : preuves dépliables, intégration en Construction, rejet motivé.
+  `app/suggestions` reste le feed complet des connexions. `app/page.tsx` —
+  **l'atelier** (`components/canvas/`) : fichiers, arêtes de liens et Constructions
+  sur une même surface, pan/zoom, lasso, groupes et cadres qui entraînent leur
+  contenu, panneau de liens (preuves, intégrer, rejeter), inspecteur qui suit la
+  nature de l'élément, dépôt de fichiers au point du lâcher. « Investiguer » (feed ou
+  panneau de liens) ouvre le suivi de l'enquête : étapes, réponse, et citations
+  affichées **seulement** si elles se vérifient encore.
+- **Canvas / atelier** : `lib/repositories/canvas.ts` + `migrations/006_canvas.sql`
+  (cadres) et `007_canvas_items.sql` (éléments **polymorphes** : fichiers *et*
+  Constructions) — la disposition vit dans des tables **nouvelles** : le schéma v1.2
+  verrouillé n'est pas touché. Déplacer un conteneur décale ses membres **côté
+  serveur**, dans la même transaction ; supprimer un conteneur ne déplace ni ne
+  supprime aucun élément ; les éléments dont l'entité a disparu sont purgés avant
+  chaque lecture (`prune`). Les liens ne sont **pas** stockés : ce sont les
+  suggestions du feed, dessinées entre les fichiers qu'elles relient
+  (`review-service.linksFor`).
 
 ## Local-first
 
 - Aucune donnée ne quitte la machine, sauf les appels chat au provider configuré
-  (`groq` par défaut, `ollama` sinon).
+  (`groq` par défaut, `ollama` sinon) — et, si vous activez `EMBED_PROVIDER=api`, le
+  **texte des fragments** envoyé au service d'embeddings choisi.
 - Les fichiers d'origine sont copiés dans `data/sources/` (gitignoré).
 - Le résumé de source est un routage non citable : seuls les fragments sont citables.

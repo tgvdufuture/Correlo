@@ -27,6 +27,15 @@ export function contentSig(claim: string): string {
 }
 
 /**
+ * `min_rang` (§3.2) : plafond épistémique. Une Construction ne dépasse jamais
+ * INFERENCE — `min_rang(INFERENCE, statut suggestion)` — et n'est jamais élevée
+ * automatiquement. FACT proposé par une suggestion devient donc INFERENCE.
+ */
+export function capAtInference(status: EpistemicStatus): EpistemicStatus {
+  return EPISTEMIC_RANK[status] > EPISTEMIC_RANK.INFERENCE ? "INFERENCE" : status;
+}
+
+/**
  * Normalisation du statut à la création (§3.2) : FACT est rétrogradé en
  * INFERENCE si le claim (match normalisé) n'est pas présent textuellement
  * dans l'un des deux fragments cités. Les autres statuts sont conservés.

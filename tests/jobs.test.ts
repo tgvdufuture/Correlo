@@ -93,6 +93,21 @@ describe("jobs queue", () => {
     expect(jobs.retry("inconnu")).toEqual({ ok: false, reason: "not_found" });
   });
 
+  it("createJob rend la ligne EXISTANTE à l'upsert (l'id du job ne change pas)", () => {
+    const { db } = makeTestDb();
+    const jobs = createJobsRepo(db);
+    const first = enqueueTestJob(jobs, "meme-operation");
+    // ré-éditer la même opération logique conserve l'id : `createJob` doit donc
+    // retrouver la ligne par sa clé, pas par le uuid qu'il vient de tirer (sinon il
+    // rendrait `undefined`, et l'appelant perdrait l'id — cas d'une investigation
+    // relancée, qui lit ensuite l'état de la file)
+    const again = enqueueTestJob(jobs, "meme-operation");
+
+    expect(again.id).toBe(first.id);
+    expect(jobs.getByIdempotencyKey("meme-operation")?.id).toBe(first.id);
+    expect(jobs.getByIdempotencyKey("inconnue")).toBeNull();
+  });
+
   it("idempotencyKey : SHA256 stable et discriminant", () => {
     const a = idempotencyKey(["ingest", "s1", "h1", "chunker-v1"]);
     expect(a).toMatch(/^[0-9a-f]{64}$/);

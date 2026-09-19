@@ -4,6 +4,7 @@ import { sha256Hex } from "@/lib/hash";
 import { decodeEmbedding } from "@/lib/llm/embedding-codec";
 import type { LlmProvider, PromptCache } from "@/lib/llm/types";
 import { MAX_PROVIDER_ATTEMPTS, providerRetryDelayMs } from "@/lib/llm/retry";
+import { assertSingleEmbeddingSpace } from "@/lib/llm/embedding-space";
 import { contentSig } from "@/lib/discover/epistemic";
 import { buildSeeds, SEED_VERSION, type SynthesisSeed } from "@/lib/synth/seeds";
 import { selectEvidence } from "@/lib/synth/select";
@@ -67,6 +68,14 @@ export interface SynthesisRunSkipped {
   nearDuplicate: number;
   /** Graine ayant déjà atteint son nombre maximal de synthèses. */
   capacity: number;
+  /**
+   * Graine **fermée par une décision** : une des synthèses de cette graine a été
+   * acceptée ou rejetée. Le feed de synthèses (Phase 5B AC3) promet qu'une synthèse
+   * rejetée ne réapparaît pas « y compris reformulée » : c'est ici que la promesse est
+   * tenue — un rejeu sur la même graine ne produit plus de variante, sinon le rejet se
+   * rejouerait indéfiniment avec d'autres mots.
+   */
+  decided: number;
   /** Preuves citées mono-source (le repo refuserait : on l'écarte avant l'appel DB). */
   intraSource: number;
   /** Énoncé identique (content_sig) déjà en base. */
@@ -226,6 +235,9 @@ export class SynthesisService {
   ) {}
 
   async run(sourceIds: string[], opts: SynthesisRunOptions): Promise<SynthesisRunResult> {
+    // Même invariant qu'en découverte : le rapprochement des graines et la sélection
+    // des preuves sont des similarités — elles n'ont de sens que dans un seul espace.
+    assertSingleEmbeddingSpace(this.deps.db, sourceIds, `run synthesize ${opts.runId}`);
     const mode = opts.mode ?? "synthesis";
     const maxSynthesesPerSeed = opts.maxSynthesesPerSeed ?? 3;
     const minEvidence = opts.minEvidence ?? 2;
@@ -271,6 +283,7 @@ export class SynthesisService {
         rejected: resumeSkipped.rejected ?? 0,
         nearDuplicate: resumeSkipped.nearDuplicate ?? 0,
         capacity: resumeSkipped.capacity ?? 0,
+        decided: resumeSkipped.decided ?? 0,
         intraSource: resumeSkipped.intraSource ?? 0,
         duplicate: resumeSkipped.duplicate ?? 0,
         evidenceMissing: resumeSkipped.evidenceMissing ?? 0,
@@ -317,8 +330,14 @@ export class SynthesisService {
         .map((id) => byId.get(id))
         .filter((f): f is CorpusFragment => f !== undefined);
 
-      // capacité de la graine atteinte (rejeu) : on n'ajoute pas une n-ième variante
-      if (
+      // Une graine dont une synthèse a été **tranchée** est fermée (Phase 5B AC3) : une
+      // décision ne se rejoue pas avec d'autres mots. Le test précède celui de capacité
+      // parce qu'il est plus fort — la capacité dit « assez de propositions », la
+      // décision dit « cette graine a été jugée ».
+      if (mode === "synthesis" && this.deps.syntheses.listDecidedByTheme(seedId).length > 0) {
+        result.skipped.decided += 1;
+      } else if (
+        // capacité de la graine atteinte (rejeu) : on n'ajoute pas une n-ième variante
         mode === "synthesis" &&
         this.deps.syntheses.listByTheme(seedId).length >= maxSynthesesPerSeed
       ) {

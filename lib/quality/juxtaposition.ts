@@ -163,9 +163,11 @@ function stemOf(term: string): string {
 
 /**
  * Termes de contenu d'une clause : au moins 5 lettres (convention du projet) et
- * sans verbe de report.
+ * sans verbe de report — un report dit ce que dit un texte, il ne dit pas de quoi
+ * parle un énoncé. Exporté pour la règle **en prose** (`isProseJuxtaposition`), qui
+ * compte la matière d'une clause avant d'y chercher un verbe de report.
  */
-function clauseTerms(clause: string): Set<string> {
+export function clauseTerms(clause: string): Set<string> {
   const terms = new Set<string>();
   for (const token of textTokens(clause)) {
     if (REPORTING_STEMS.some((stem) => token.startsWith(stem))) continue;
@@ -251,4 +253,256 @@ export function isJuxtapositionClaim(claim: string): boolean {
   const rightStems = new Set([...right].map(stemOf));
   for (const term of left) if (rightStems.has(stemOf(term))) return false;
   return true;
+}
+
+/* ====================================================================== *
+ * Juxtaposition **en prose** (2026-09-18) — la même faute, jugée sur une réponse
+ * d'investigation et non sur un claim d'une phrase.
+ * ====================================================================== */
+
+/**
+ * Version de la règle en prose — tracée avec l'investigation (`conclusion_rule_version`).
+ *
+ * Distincte de `JUXTAPOSITION_RULE_VERSION` (`jux-v2`), qui juge les claims : celle-ci
+ * ne la remplace pas et ne la modifie pas — le verdict 2A gelé reste lisible sous la
+ * même règle.
+ */
+export const PROSE_JUXTAPOSITION_RULE_VERSION = "jux-prose-v1";
+
+/**
+ * Connecteurs de bipartition **en prose**. La liste des claims (`tandis que`,
+ * `alors que`…) est complétée de deux familles qu'un claim d'une seule phrase ne peut
+ * pas employer : l'opposition simple (`mais`, `cependant`, `en revanche`, `de son
+ * côté`) et la distribution (`d'un côté… de l'autre`).
+ */
+const PROSE_BIPARTITION_MARKERS = [
+  ...BIPARTITION_MARKERS,
+  " mais ",
+  " cependant",
+  " en revanche",
+  " de son cote",
+  " pour sa part",
+];
+
+/**
+ * Verbes de **report** : « X dit que … ». Propre à la règle en prose (et donc
+ * distincte de `REPORTING_STEMS`, qui sert aux claims et dont la modification
+ * déplacerait le verdict 2A gelé) — un énoncé qui empile deux reports dit ce que
+ * chacun affirme, pas ce que les deux permettent d'établir.
+ *
+ * Le piège de ce genre de liste est la **conjugaison** : un préfixe qui couvre le
+ * singulier peut manquer le pluriel (`montre` couvre `montrent`, mais `soutien` ne
+ * couvre pas `soutient` — voyelle qui change). Constaté en mesurant la sortie réelle :
+ * « Descartes **soutient** que… » n'était pas compté comme un report, et la
+ * juxtaposition passait. Les radicaux sont donc pris assez courts pour couvrir la
+ * famille, quitte à attraper un mot voisin — un faux positif ici rend la règle plus
+ * stricte, un faux négatif la rend aveugle, et c'est la seconde erreur qui est arrivée.
+ */
+const PROSE_REPORTING_STEMS = [
+  "affirm",
+  "souti", // soutient, soutiennent, soutien — et « souten » pour soutenir/soutenait
+  "souten",
+  "consid",
+  "montr",
+  "expliqu",
+  "decri", // décrit, décrivent — « decrit » ne couvre pas « decrivent »
+  "ecri",
+  "defin",
+  "rappel",
+  "reconn",
+  "pretend",
+  "propos",
+  "estim",
+  "observ",
+  "insist",
+  "soulign",
+  "pense",
+  "juge",
+  "declar",
+  "present",
+  "analys",
+  "contest",
+  "adme", // admet, admettent
+  "avanc",
+  "formul",
+  "enseign",
+  "attribu",
+  "qualifi",
+  "indiqu",
+  "constat",
+  "remarqu",
+];
+
+/**
+ * Prédicats relationnels **en prose** : l'énoncé dit comment un texte **éclaire**
+ * l'autre. Construits par familles, sur les relations que le produit reconnaît
+ * (`combination`, `extension`, `tension`, `application`, vocabulaire de la 5A) :
+ * prolonger, appliquer, fonder, s'opposer, reprendre.
+ *
+ * Ce qui **n'y figure pas**, volontairement :
+ *   - les verbes de report (`affirme`, `souligne`, `considère`, `montre`) : attribuer
+ *     un contenu à un texte ne relie rien — c'est précisément le patron visé ;
+ *   - `fait de` / `faisant de` : « faisant de lui un interprète actif » caractérise le
+ *     sujet au lieu d'énoncer une relation entre les deux textes (mesuré sur la sortie
+ *     réelle du 2026-09-18, où cette tournure terminait une juxtaposition).
+ *
+ * Comme pour la règle des claims, un prédicat absent n'est pas une erreur : c'est un
+ * verbe de plus à ajouter — d'où la version de règle. La règle est **conservatrice
+ * dans ce sens** : trouver une relation fait passer l'énoncé.
+ */
+const PROSE_RELATIONAL_MARKERS = [
+  // prolonger / dépasser
+  "prolonge",
+  "pousse plus loin",
+  "va plus loin",
+  "etend",
+  "radicalise",
+  "approfondit",
+  "complete",
+  "depasse",
+  // appliquer / transposer
+  "applique",
+  "transpose",
+  "s applique",
+  "s appuie",
+  "se sert",
+  "trouve dans",
+  "fournit",
+  "donne a",
+  // fonder / expliquer / rendre compte
+  "fonde",
+  "justifie",
+  "rend compte",
+  "explique",
+  "eclaire",
+  "permet de",
+  "permet d",
+  "rend possible",
+  "conditionne",
+  "met en evidence",
+  "revele",
+  "se traduit",
+  // s'opposer / arbitrer / corriger
+  "s oppose",
+  "contredit",
+  "corrige",
+  "invalide",
+  "restreint",
+  "arbitre",
+  "tranche",
+  "refute",
+  "borne",
+  // reprendre / correspondre (et la liste déjà employée pour les claims)
+  "correspond",
+  "repond a",
+  "fait echo",
+  "s inspire",
+  "reprend",
+  "se retrouve",
+  "se rejoignent",
+  "rejoint",
+  "trouve son equivalent",
+  "prefigure",
+  "reflete",
+  "revient a",
+  "contrairement a",
+];
+
+/**
+ * Recouvrement de termes en dessous duquel on ne juge pas une clause : une clause
+ * trop courte (« voir [0] », « ce point est décisif ») ne porte pas d'attribution.
+ */
+export const PROSE_MIN_CLAUSE_TERMS = 4;
+
+/**
+ * Découpe une réponse en clauses : ponctuation forte, puis **chaque** occurrence d'un
+ * connecteur de bipartition (le premier trouvé, puis on repart après lui).
+ *
+ * Une première version coupait au premier connecteur rencontré dans la liste, puis
+ * cherchait les suivants **dans le reste** seulement : « A …, mais B …, tandis que C … »
+ * donnait deux clauses et non trois, la première portant deux reports. Un découpage
+ * complet donne les vraies frontières — c'est ce que compte la règle.
+ */
+export function splitProseClauses(text: string): string[] {
+  // les indices écrits par le modèle (« (voir [0]) ») ne sont pas des termes de contenu
+  const normalized = prenormalize(text).replace(/\(\s*voir\s*\[?\d+\]?\s*\)/g, " ");
+  const pattern = new RegExp(PROSE_BIPARTITION_MARKERS.join("|"), "g");
+  const parts: string[] = [];
+  for (const sentence of normalized.split(/(?<=[.;!?])\s+/)) {
+    let rest = sentence;
+    let match = pattern.exec(rest);
+    while (match && match.index > 0) {
+      parts.push(rest.slice(0, match.index));
+      rest = rest.slice(match.index + match[0].length);
+      pattern.lastIndex = 0;
+      match = pattern.exec(rest);
+    }
+    parts.push(rest);
+  }
+  return parts.map((p) => p.trim()).filter((p) => p.length > 0);
+}
+
+/** Vrai si la clause **attribue** un contenu à un texte (verbe de report). */
+export function hasReportingVerb(clause: string): boolean {
+  for (const token of textTokens(clause)) {
+    if (PROSE_REPORTING_STEMS.some((stem) => token.startsWith(stem))) return true;
+  }
+  return false;
+}
+
+/** Vrai si une réponse dit **comment** un texte éclaire l'autre. */
+export function hasProseRelationalPredicate(text: string): boolean {
+  if (hasRelationalPredicate(text)) return true;
+  const flat = stripPurposeSpans(prenormalize(text));
+  return PROSE_RELATIONAL_MARKERS.some((marker) => flat.includes(marker));
+}
+
+/**
+ * Vrai si une réponse est une **juxtaposition en prose** : des reports mis côte à côte.
+ *
+ * Cas réel qui a motivé la règle (2026-09-18, corpus de 3 853 fragments) : « Bernard et
+ * Descartes considèrent tous deux l'expérimentateur comme un intermédiaire entre la
+ * nature et la connaissance, mais Bernard souligne que … (voir [0]), tandis que
+ * Descartes montre que … (voir [1]), faisant de lui un interprète actif plutôt qu'un
+ * simple spectateur. » — deux reports coordonnés, aucune relation énoncée entre les
+ * documents.
+ *
+ * **Pourquoi pas l'attribution lexicale** : la première version exigeait que chaque
+ * clause soit « attribuable » à un fragment cité (part de ses termes présents dans le
+ * fragment ≥ 0,5). Mesurée sur la sortie réelle, elle est aveugle — la clause
+ * « Descartes montre que l'expérimentateur doit partir d'expériences particulières, en
+ * remontant des effets aux causes cachées » ne partage que **0,27** de ses termes avec
+ * le fragment de Descartes qu'elle résume : le modèle attribue une idée à un document
+ * sans reprendre son vocabulaire. Le signal fiable n'est donc pas lexical, il est
+ * **structurel** : deux reports, un connecteur, aucune relation.
+ *
+ * Trois conditions, toutes déterministes :
+ *   1. aucune expression relationnelle (`hasProseRelationalPredicate`) ;
+ *   2. au moins **deux clauses différentes** portent un **verbe de report** ;
+ *   3. la réponse contient un **connecteur de bipartition** (`tandis que`, `alors
+ *      que`, `mais`, `cependant`, `en revanche`, `de son côté`, `pour sa part`, `;`).
+ *
+ * La règle juge une **forme**, pas une vérité : elle ne dit pas si l'addition est
+ * juste (c'est le rôle des évaluateurs, comme en 2A), elle dit que l'énoncé se
+ * contente de redire les deux documents l'un après l'autre. Elle est volontairement
+ * conservatrice dans l'autre sens : un prédicat relationnel de la liste suffit à faire
+ * passer la réponse — un verbe manquant est un verbe à ajouter, d'où la version.
+ */
+export function isProseJuxtaposition(answer: string): boolean {
+  const trimmed = answer.trim();
+  if (!trimmed) return false;
+  if (hasProseRelationalPredicate(trimmed)) return false;
+  if (!hasBipartitionConnector(trimmed)) return false;
+
+  const reporting = splitProseClauses(trimmed).filter(
+    (clause) => clauseTerms(clause).size >= PROSE_MIN_CLAUSE_TERMS && hasReportingVerb(clause)
+  );
+  return reporting.length >= 2;
+}
+
+/** Vrai si la réponse coordonne deux membres (`tandis que`, `mais`, `;`…). */
+function hasBipartitionConnector(text: string): boolean {
+  const normalized = prenormalize(text);
+  if (normalized.includes(";")) return true;
+  return PROSE_BIPARTITION_MARKERS.some((marker) => normalized.includes(marker));
 }

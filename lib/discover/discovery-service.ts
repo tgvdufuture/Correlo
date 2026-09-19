@@ -20,15 +20,32 @@ import {
   rejectClaim,
 } from "@/lib/discover/claim-rules";
 import { documentFrequency, rareThreshold } from "@/lib/quality/lexical-anchor";
+import { assertSingleEmbeddingSpace } from "@/lib/llm/embedding-space";
 import type { SuggestionsRepo } from "@/lib/repositories/suggestions";
 import { MAX_PROVIDER_ATTEMPTS, providerRetryDelayMs } from "@/lib/llm/retry";
 
 export interface DiscoveryRunOptions {
   runId: string;
+  /**
+   * Seed imposée, au lieu de la dériver de (`corpus_hash`, `run_id`).
+   *
+   * Sert à **isoler une variable** : rejouer la sélection d'un run archivé sous un
+   * identifiant neuf — donc sans écraser la ligne `discover_runs` du run d'origine —
+   * pour que la seule différence mesurée soit celle qu'on veut expliquer (un autre
+   * espace vectoriel, par exemple). La seed rejouée est persistée telle quelle dans
+   * l'identité du run : un run rejoué reste donc rejouable.
+   */
+  seed?: string;
   sampler: "diversified" | "top6";
   maxPairs?: number;
   maxPairsPerSource?: number;
   batchSize?: number;
+  /**
+   * Sources examinées **en premier** par l'échantillonneur : le dépôt d'un fichier
+   * lance un run focalisé sur lui, sinon le budget de paires partirait aux premiers
+   * documents du corpus et le nouveau venu ne serait jamais comparé à rien.
+   */
+  focusSources?: string[];
   /** Reprise au checkpoint : nombre de paires déjà traitées (0 = début). */
   startBatch?: number;
   /**
@@ -159,6 +176,12 @@ export class DiscoveryService {
   ) {}
 
   async run(sourceIds: string[], opts: DiscoveryRunOptions): Promise<DiscoveryRunResult> {
+    // Invariant : un run ne compare que des vecteurs du **même** espace. Après une
+    // bascule de connecteur d'embeddings non suivie d'une re-vectorisation, le corpus
+    // en contient deux — `dotProduct` lirait alors les `dims` premières valeurs de
+    // chaque vecteur et rendrait des similarités fausses mais plausibles. Échouer ici
+    // est la seule issue honnête (`npm run reembed` remet le corpus d'aplomb).
+    assertSingleEmbeddingSpace(this.deps.db, sourceIds, `run discover ${opts.runId}`);
     const maxPairs = opts.maxPairs ?? 200;
     // batchs de 3 paires (fragments intégraux) : quota d'entrée réel du provider
     // (7 000 tokens/min sur Groq free) — déviation documentée vs « batchs 8-10 »
@@ -169,7 +192,7 @@ export class DiscoveryService {
     const anchorDf = documentFrequency(fragments.map((f) => f.text));
     const anchorThreshold = rareThreshold(fragments.length);
     const corpusHash = this.computeCorpusHash(sourceIds);
-    const seed = makeSeed(corpusHash, opts.runId);
+    const seed = opts.seed ?? makeSeed(corpusHash, opts.runId);
 
     const pairs = samplePairs({
       fragments,
@@ -177,6 +200,7 @@ export class DiscoveryService {
       sampler: opts.sampler,
       maxPairs,
       maxPairsPerSource: opts.maxPairsPerSource,
+      focusSourceIds: opts.focusSources,
     });
     const startIdx = Math.min(Math.max(opts.startBatch ?? 0, 0), pairs.length);
     const resumeSkipped = opts.resume?.skipped ?? {};

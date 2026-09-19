@@ -2,8 +2,10 @@ import type { z } from "zod";
 import type { ChatMessage, EmbedBatcher, LlmProvider } from "@/lib/llm/types";
 
 /**
- * Composition (PRD §3.1) : chat → provider configuré (groq|ollama),
- * embed → Ollama local. Aucun fallback automatique.
+ * Composition (PRD §3.1) : chat → `LLM_CHAT_PROVIDER` (groq|ollama),
+ * embed → `EMBED_PROVIDER` (ollama local | connecteur API). Aucun fallback
+ * automatique : le connecteur d'embeddings est un choix, et son espace vectoriel
+ * est un réglage du corpus (voir `lib/llm/embedding-space.ts`).
  */
 export class HybridProvider implements LlmProvider, EmbedBatcher {
   constructor(

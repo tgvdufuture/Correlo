@@ -6,6 +6,7 @@ import { DATA_DIR, ensureDataDirs, getDb } from "@/lib/db/client";
 import { sha256Hex } from "@/lib/hash";
 import { createSourcesRepo } from "@/lib/repositories/sources";
 import { createJobsRepo, idempotencyKey } from "@/lib/repositories/jobs";
+import { createCanvasRepo } from "@/lib/repositories/canvas";
 import { CHUNKER_VERSION } from "@/lib/ingest/chunker";
 import { normalizeText } from "@/lib/ingest/normalizer";
 import { extractPdfPages, parseTextBuffer } from "@/lib/ingest/parsers";
@@ -15,6 +16,11 @@ import { sanitizeSourceTitle } from "@/lib/ingest/title";
  * POST /api/sources — import TEXT/PDF (multipart) ou URL (JSON).
  * 201 {id, content_hash, ingest_status:"pending"} · 409 doublon · 422 PDF sans texte · 400 invalide.
  * La réponse est rapide : le travail (chunk/embed) se fait en job asynchrone (F1.5 AC2).
+ *
+ * Un fichier importé **apparaît immédiatement sur le canvas** (canvas-atelier) :
+ * `canvas_x`/`canvas_y` (facultatifs, multipart) le posent là où il a été déposé,
+ * sinon il prend la première place libre. Son ingestion déclenche ensuite la
+ * découverte de ses liens (voir `ingest-service`).
  */
 export async function POST(req: NextRequest) {
   ensureDataDirs();
@@ -34,6 +40,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ code: "invalid_payload", message: "fichier manquant ou vide" }, { status: 400 });
     }
     const buf = Buffer.from(await file.arrayBuffer());
+    const dropPosition = canvasDropPosition(form.get("canvas_x"), form.get("canvas_y"));
     const rawTitle =
       (typeof form.get("title") === "string" ? (form.get("title") as string).trim() : "") ||
       file.name;
@@ -58,6 +65,7 @@ export async function POST(req: NextRequest) {
         raw_content: rawContent,
         content_hash: contentHash,
       });
+      placeOnCanvas(db, id, dropPosition);
       enqueueIngest(jobs, id, contentHash, {});
       return NextResponse.json({ id, content_hash: contentHash, ingest_status: "pending" }, { status: 201 });
     }
@@ -102,6 +110,7 @@ export async function POST(req: NextRequest) {
       raw_content: rawContent,
       content_hash: contentHash,
     });
+    placeOnCanvas(db, id, dropPosition);
     enqueueIngest(jobs, id, contentHash, { page_map: pageMap });
     return NextResponse.json({ id, content_hash: contentHash, ingest_status: "pending" }, { status: 201 });
   }
@@ -140,6 +149,7 @@ export async function POST(req: NextRequest) {
     raw_content: "",
     content_hash: placeholderHash,
   });
+  placeOnCanvas(db, id, null);
   enqueueIngest(jobs, id, placeholderHash, { url: normalizedUrl });
   return NextResponse.json({ id, content_hash: placeholderHash, ingest_status: "pending" }, { status: 201 });
 }
@@ -152,6 +162,28 @@ export async function GET() {
   const db = getDb();
   const sources = createSourcesRepo(db);
   return NextResponse.json(sources.list());
+}
+
+/**
+ * Poser le fichier sur le canvas. Sans coordonnées, c'est la première place libre ;
+ * avec elles, l'endroit exact du dépôt — l'utilisateur retrouve son fichier là où il
+ * l'a lâché, ce qui est tout l'intérêt d'un plan de travail.
+ */
+function placeOnCanvas(db: ReturnType<typeof getDb>, id: string, pos: { x: number; y: number } | null): void {
+  const canvas = createCanvasRepo(db);
+  if (pos) canvas.placeAt("source", id, pos.x, pos.y);
+  else canvas.place("source", id);
+}
+
+/** Coordonnées de dépôt (`canvas_x`/`canvas_y`) — absentes ou illisibles ⇒ placement automatique. */
+function canvasDropPosition(
+  rawX: FormDataEntryValue | null,
+  rawY: FormDataEntryValue | null
+): { x: number; y: number } | null {
+  const x = Number(rawX);
+  const y = Number(rawY);
+  if (rawX === null || rawY === null || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x, y };
 }
 
 function enqueueIngest(

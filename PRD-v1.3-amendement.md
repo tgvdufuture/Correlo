@@ -103,7 +103,7 @@ Ce qui **ne change pas** : la §3.2 *DO NOT CHANGE* dans son intégralité (sch�
 
 ## 5. Décision reportée (à trancher en v1.4)
 
-- **Construction depuis une synthèse** : `constructions.suggestion_id` est `UNIQUE` et `depth = 1` (§3.3). Promouvoir une synthèse sur le canvas exigerait soit une colonne `synthesis_id`, soit un nœud de canvas distinct. **v1.3 ne tranche pas** et n'ajoute rien : les synthèses vivent dans leur propre feed.
+- **Construction depuis une synthèse** : `constructions.suggestion_id` est `UNIQUE` et `depth = 1` (§3.3). Promouvoir une synthèse sur le canvas exigerait soit une colonne `synthesis_id`, soit un nœud de canvas distinct. **v1.3 ne tranche pas** et n'ajoute rien : les synthèses vivent dans leur propre feed. → **voie ouverte par §9** : le canvas accepte désormais des éléments polymorphes (`canvas_items.item_kind`), donc « un nœud de canvas distinct » est le chemin naturel — reste à décider du contenu d'une synthèse posée sur le plan.
 - **Ingestion multimodale** (image d'architecture, plan) : nécessiterait une colonne `modality` sur `fragments` (§3.3 verrouillé) ou une table dérivée + embeddings image. Hors périmètre v1.3 ; l'exigence réelle retenue ici est l'**agnosticisme au domaine**, pas le multimodal.
 
 ## 6. Direction de code
@@ -167,3 +167,161 @@ Launch Criteria (évalués après Phase 5A) — tous vrais avant de continuer :
 - ≥ 1 conversation engagée par session (Phase 6) et ≥ 20 % des synthèses acceptées.
 
 Primary metric (inchangée dans sa formulation v1.2, étendue) : **découvertes « wow » par session** — désormais mesurée aussi sur les synthèses (`apport_precis`), pas seulement sur les paires.
+
+## 9. Amendement v1.4 (2026-09-16) — le canvas comme atelier
+
+Statut : **validé par l'utilisateur** · Amende la §4 (Phases 2B/3) et la §3.3 *bis* · Ne change **aucun** critère d'acceptation existant.
+
+### 9.1 Pourquoi
+
+Le PRD (v1.2 §4, Phase 3) parle de « la Construction sur son canvas » sans jamais définir l'écran, et ne connaît qu'un seul type d'objet posable : les Constructions. Or l'usage réel du produit est **l'inverse** : on dépose des **documents**, on les dispose, et on veut voir ce que le moteur en tire — une suggestion relie deux **fragments**, donc deux **sources**, et rien dans l'écran ne montrait ces sources. Demande de l'utilisateur : « que le canvas soit la page principale, que l'upload affiche les fichiers dans le canvas comme pour stocker, avec la disposition modulable comme Photoshop, et qu'en parallèle l'IA s'interroge sur les fichiers et propose des liens entre eux ».
+
+Trois décisions tranchées avec l'utilisateur :
+
+| Question | Décision |
+|---|---|
+| Que porte le canvas une fois les fichiers déposés ? | **Fichiers + liens + Constructions** |
+| Quand l'IA cherche-t-elle des liens ? | **Automatiquement après dépôt** (à la fin de l'ingestion) |
+| Que deviennent la Bibliothèque et la page Connexions ? | **Tout dans le canvas** (l'atelier est le lieu de travail ; les deux autres écrans restent, secondaires) |
+
+### 9.2 Ce qui change dans le PRD
+
+| Section | Changement v1.4 |
+|---|---|
+| §3.1 Architecture | L'écran d'entrée est un **plan de travail** (`/`) : sources, liens et Constructions sur une même surface, positions persistées. Aucun appel LLM nouveau : la découverte est celle de la Phase 2A, déclenchée par l'ingestion. |
+| §3.3 Data Models | Les dispositions vivent dans des tables **nouvelles** (`canvas_items` polymorphe, `canvas_frames`), jamais dans une colonne d'une table verrouillée. |
+| §4 Phase 3 | Les AC de la Phase 3 (feed AC1-AC3, US-05 à US-08) sont **inchangés** : l'atelier les rend visibles, il n'en retire aucun. La règle d'exposition §3.2 continue d'être posée par le feed **et** par le panneau de liens de l'atelier. |
+| §4 Phase 2A/2B | Un run peut être **focalisé** (`focus_source_ids`) : les sources à examiner passent en tête de l'échantillonnage. `SAMPLER_VERSION` passe à `sampler-v2`. |
+| §6 Métriques | Inchangées. L'atelier est le premier écran qui rend la métrique « ≥ 40 % de suggestions ouvertes » **directement actionnable** (l'ouvrir fait partie de la décision). |
+| §5 (décision reportée) | La « promotion d'une synthèse sur le canvas » dispose désormais d'un chemin naturel (élément de canvas d'un troisième `item_kind`) ; la décision de fond reste ouverte. |
+
+### 9.3 Modèles ajoutés (complément à §7)
+
+`canvas_items` (migration `007`) — polymorphe :
+
+| Champ | Type | Notes |
+|---|---|---|
+| item_kind | TEXT | `construction` \| `source` — `CHECK` |
+| item_ref | TEXT | uuid de l'entité (`constructions.id` / `sources.id`) |
+| x, y, z | REAL / INTEGER | positions **absolues** ; `z` = ordre d'empilement |
+| frame_id | TEXT | → `canvas_frames(id)`, `ON DELETE SET NULL` (dissoudre ne déplace rien) |
+| created_at, updated_at | timestamp | |
+| — | — | `PRIMARY KEY (item_kind, item_ref)` |
+
+SQLite n'a **pas** de clé étrangère polymorphe : l'intégrité est assurée par le dépôt (`prune()` retire les orphelines avant chaque lecture, et la suppression d'une source retire son élément dans la transaction qui la supprime).
+
+`canvas_frames` (migration `006`) est inchangée : un cadre/groupe contient indifféremment des fichiers et des Constructions.
+
+### 9.4 Réglages ajoutés
+
+`AUTO_DISCOVER` (`on` par défaut), `AUTO_DISCOVER_MAX_PAIRS` (12), `AUTO_DISCOVER_MAX_PAIRS_PER_SOURCE` (12), `AUTO_DISCOVER_BATCH_SIZE` (4), `AUTO_DISCOVER_MAX_FRAGMENT_CHARS` (2400), `AUTO_DISCOVER_INTER_BATCH_DELAY_MS` (65 000 — fenêtre de quota du provider). `off` rend le comportement d'avant (run déclenché à la main).
+
+### 9.5 Ce que cet amendement ne fait pas
+
+- Il ne change **aucune** contrainte §3.2/§3.3 (schéma verrouillé, intra-source, blocage de variantes, statuts épistémiques, provenance copiée).
+- Il n'ajoute **aucun** appel LLM dans les routes : l'analyse reste un job (`discover`), avec lease, checkpoint et reprise (Phase 2A/2B).
+- Il ne supprime pas les écrans Bibliothèque et Connexions : ce sont des vues secondaires du même contenu, pas des flux parallèles.
+
+## 10. Amendement v1.5 (2026-09-16) — connecteur d'embeddings et espace vectoriel du corpus
+
+Statut : **validé par l'utilisateur** · Amende la §3.1 (architecture) et la §3.2 *DO NOT CHANGE* **sur une seule phrase** (l'origine des embeddings) · Ne change aucun critère d'acceptation.
+
+### 10.1 Pourquoi
+
+La §3.1 disait : « thèmes par clustering d'embeddings **locaux** (aucun appel réseau) », et `lib/llm/types.ts` (§3.2 *DO NOT CHANGE*) précisait « embed = Ollama local ». Conséquence opérationnelle : **un dépôt de fichier exigeait qu'Ollama tourne**, sinon l'ingestion s'arrêtait à l'étape d'embedding — alors que le chat, lui, passait déjà par un connecteur distant. Demande de l'utilisateur : « je ne veux pas utiliser Ollama mais les connecteurs API », avec une contrainte explicite : **pouvoir revenir à Ollama à tout moment, et que ça marche**.
+
+Cette demande n'est pas qu'un réglage : un vecteur n'a de sens que dans l'espace qui l'a produit. Le service réel ne propose, sur le compte utilisé, **qu'un seul** modèle d'embeddings (`nvidia/nemotron-3-embed-1b`) et **2048 dims non négociables** (`768` → `400`). Basculer le connecteur laisse donc forcément deux espaces incomparables en base — et un corpus mixte ne produit pas une erreur : il produit des similarités **fausses mais plausibles** (`dotProduct(a, b, dims)` lit les `dims` premières valeurs de chaque vecteur).
+
+### 10.2 Ce qui change dans le PRD
+
+| Section | Changement v1.5 |
+|---|---|
+| §3.1 Architecture | Les embeddings ne sont plus « locaux » par définition : **connecteur configurable** — `ollama` (local, 768 dims, le **défaut**) ou `api` (endpoint OpenAI-compatible `POST /embeddings`, 2048 dims pour le modèle mesuré). Le chat reste inchangé. |
+| §3.2 *DO NOT CHANGE* | **Une seule phrase change** : « embed = Ollama local » devient « embed = connecteur configurable (`EMBED_PROVIDER`) ». Les signatures de `LlmProvider`, le confinement LLM, l'absence de fallback automatique, le schéma des suggestions et toutes les autres contraintes sont **inchangés**. |
+| §3.3 Data Models | **Aucune colonne ajoutée** aux tables verrouillées : `fragments.embedding_model/dimensions/version` existaient déjà et portent l'identité de l'espace. Migration `008` : `jobs.kind` accepte `reembed` (reconstruction de table, même procédure que la `003`). |
+| §3.5 / Phase 2A | Nouvel **invariant dur** : un run refuse un corpus multi-espaces (`EmbeddingSpaceMismatchError`), avant tout appel LLM. Un run focalisé (`sampler-v2`) et les barrières existantes ne bougent pas. |
+| §4 Roadmap | Aucune phase ajoutée, aucun AC modifié : la bascule est un **outil d'exploitation** (`npm run reembed`), pas une phase produit. |
+| §6 Métriques | Inchangées. Elles se lisent désormais sur un corpus aligné — ce que l'atelier rend visible par un bandeau. |
+
+### 10.3 L'invariant, et pourquoi il est un refus plutôt qu'un avertissement
+
+Trois règles, toutes vérifiées côté serveur :
+
+1. **Un run ne compare que des vecteurs du même espace** (identité complète : modèle, dimensions, version). Deux modèles de même dimension restent deux espaces. Violation ⇒ le run **échoue** en nommant les espaces présents et la commande de réparation, au lieu de rendre des liens faux.
+2. **Rien n'est caché par un défaut de disposition ni par un défaut de configuration** : l'atelier affiche ce qui est hors espace (`GET /api/canvas → embeddingSpace`), et une configuration invalide ne rend pas l'écran indisponible — elle est nommée dans le bandeau.
+3. **La réparation est la même commande dans les deux sens** : `npm run reembed` écrit le corpus entier dans l'espace **actif**, par lots (transaction par lot, corpus exploitable pendant l'opération), en **sautant** ce qui est déjà dans l'espace visé (donc reprenable après une coupure), et le CLI enregistre les espaces avant/après.
+
+### 10.4 Réglages ajoutés
+
+`EMBED_PROVIDER` (`ollama` | `api`, défaut `ollama`), `NVIDIA_BASE_URL`, `NVIDIA_API_KEY`, `NVIDIA_EMBED_MODEL` (`nvidia/nemotron-3-embed-1b`), `NVIDIA_EMBED_DIMENSIONS` (`2048`), `NVIDIA_EMBED_INPUT_TYPE` (`passage` | `query` | `off`), `NVIDIA_EMBED_BATCH_SIZE` (`32`), `NVIDIA_EMBED_TIMEOUT_SECONDS` (`120`). Le CLI accepte `--dry-run`, `--force`, `--sources`, `--batch-size`, `--wait`.
+
+### 10.5 Ce que cet amendement ne fait pas
+
+- Il ne change **aucune** contrainte de la §3.3 (aucune colonne ajoutée, aucun nouveau kind d'entité).
+- Il ne modifie **pas** la formule d'identité d'un run (`corpus_hash = SHA256(source_id:content_hash)`, AC1 de la Phase 2B) : elle ne porte donc pas l'espace vectoriel. Conséquence écrite noir sur blanc dans le CLI : après une re-vectorisation, un run archivé n'est **plus reproductible à l'identique** bien que son identité se recalcule.
+- Il ne rend pas le connecteur distant **obligatoire** ni ne retire Ollama : le défaut du schéma reste `ollama`, et le retour en 768 dims est une commande.
+- Il ne touche pas à la qualité de la découverte : les essais réels montrent que la qualité du **rapprochement** suit celle des embeddings, mais le taux de suggestions retenues reste borné par les barrières de la Phase 2A (défaut « juxtaposition », déjà documenté). Sa règle en prose (`jux-prose-v1`) est **distincte** de celle des claims (`jux-v2`) : le verdict 2A gelé reste lisible sous sa propre version.
+
+## 11. Phase 4 — investigation (implémentée le 2026-09-18)
+
+Statut : **livrée** · N'ajoute **aucun** critère d'acceptation (US-09 AC1–AC3 du PRD v1.2 sont repris tels quels) · Ne modifie aucune table.
+
+### 11.1 Ce que l'agent a le droit de faire
+
+Un **seul** agent, une boucle séquentielle, **un appel LLM par étape**, **5 étapes au plus** (plafond dur : un payload qui demande plus est tronqué). Chaque étape est **une** action, choisie par le modèle parmi trois :
+
+| Action | Entrée | Ce que le serveur fait |
+|---|---|---|
+| `search` | une requête libre | recherche **lexicale** sur le corpus (racines de 5 lettres, score IDF) — aucun appel réseau |
+| `expand` | un indice de catalogue | voisinage **vectoriel** du fragment, dans un autre document (embeddings déjà en base) |
+| `conclude` | un énoncé + des indices cités | termine l'enquête, sous réserve des règles du §11.3 |
+
+Deux conséquences voulues : **AC3 est vrai par construction** (aucun outil de l'agent ne peut sortir sur le réseau, il n'en existe pas), et la recherche est **déterministe** (elle n'encode pas la requête, donc elle ne dépend ni du provider d'embeddings ni d'un appel supplémentaire).
+
+### 11.2 Traçabilité : le modèle ne voit jamais d'identifiant
+
+Le serveur tient un **catalogue** de fragments et n'expose au modèle que des **indices** (`[0]`, `[3]`…) ; le rattachement indice → fragment est serveur, comme le rattachement `candidate_id` de la Phase 2A. Le catalogue conserve une **copie** du texte au moment T (même logique que `provenance_snapshot`, US-08) : c'est elle qui est comparée au fragment vivant **à chaque lecture**. Trois pertes de statut, toutes testées : fragment disparu, texte modifié, source modifiée ; dans chaque cas l'étape passe `failed` et l'énoncé **n'est jamais présenté comme une preuve** (AC2).
+
+### 11.3 La barrière de conclusion (`conclusion-v2`, 2026-09-18)
+
+Le prompt seul ne suffisait pas — constaté deux fois sur des runs réels (corpus de 3 853 fragments) : le modèle a d'abord conclu **dès la première action**, à partir des deux seules graines, en reformulant la suggestion ; puis, une fois cette voie fermée, il a produit une **juxtaposition reformulée** (« … mais Bernard souligne …, tandis que Descartes montre … »). Cinq refus déterministes s'appliquent désormais côté serveur, dans un module **pur et partagé** (`lib/quality/conclusion.ts`, appelé par le service, le validateur et les tests — le service n'en réimplémente aucune) :
+
+1. **`conclusion_sans_exploration`** — conclure sans qu'aucune exploration (`search`/`expand`) n'ait **abouti** est refusé : il n'y a rien d'approfondi dans une réponse qui n'a regardé que la question. Seule règle **de run** (elle lit la trace) ; les quatre suivantes lisent le **texte**.
+2. **`conclusion_juxtaposition`** — deux **reports** (verbes : affirme, souligne, montre, considère…) coordonnés par un **connecteur de bipartition** (`tandis que`, `alors que`, `mais`, `cependant`, `en revanche`, `de son côté`, `;`) et **aucun prédicat relationnel** : l'énoncé redit les deux documents l'un après l'autre. La règle est **structurelle**, pas attributive : mesurée sur la sortie réelle, l'attribution d'une clause à son fragment par recouvrement lexical plafonne à **0,27** pour une clause qui le résume pourtant correctement — le modèle attribue sans reprendre les mots.
+3. **`conclusion_recopie_la_question`** — une conclusion qui partage ≥ 80 % des termes significatifs de la suggestion ne l'approfondit pas, elle la rejoue. Le seuil est **propre à l'enquête** : le seuil partagé de paraphrase (`text-rules`, 0,85 — « un énoncé qui recopie une preuve ») a été mesuré à **0,846** sur cette sortie réelle, un cran sous la barre, et sert un autre problème — il n'a pas été touché.
+4. **`conclusion_generique`** — formules holistiques, vraies de n'importe quelle paire (« tous deux », « les deux documents », « partagent la même exigence »…).
+5. **`conclusion_hors_format`** / **`conclusion_langue`** — moins de 12 mots, plus de 160 mots, plus de 4 phrases, ou un énoncé non francophone. Le prompt demande 40–120 mots ; la barrière est plus large, elle ne coupe que ce qui n'est pas un énoncé.
+
+Un refus **consomme l'étape mais ne termine pas l'enquête** : les cinq motifs sont **récupérables**, le modèle voit le refus et sa raison dans la transcription et se reprend dans le budget restant ; si le budget s'épuise, la raison rapportée est celle du refus, jamais un énoncé creux. Le prompt (`investigation-v2`) énonce les cinq motifs, **décrit** la juxtaposition et donne un contre-exemple réel : la règle est le juge, mais elle ne doit pas être une surprise.
+
+**Effet mesuré** (même suggestion, même corpus, chemin réel job → worker) : avant → 1 étape, puis 3 étapes et une juxtaposition **acceptée** ; après → **5 étapes**, étapes 3 et 4 refusées (`conclusion_generique`), étape 5 acceptée avec une relation énoncée. Le document d'enquête porte `conclusion_rule_version` / `juxtaposition_rule_version` : un refus stocké nomme la règle qui l'a produit, et `npm run validate:phase4` re-joue la barrière sur toutes les conclusions stockées.
+
+### 11.4 Ce que cet amendement ne fait pas
+
+- Il ne garantit **pas** la **justesse** d'une relation : la barrière coupe la coordination **vide**, pas une relation fausse ou plaquée — « … trouve son équivalent dans …, mais l'un …, l'autre … » passe. Ce dernier cran demande une évaluation sémantique (modèle + lecture humaine), comme la grille Q25 de la 5A ; décision de protocole, pas de plomberie.
+- Il n'ajoute **ni conversation ni accès web** : c'est la Phase 6, et l'agent d'investigation n'en est pas le socle (il ne lit que le corpus, il ne discute pas).
+- Il ne tranche pas la promotion d'une synthèse ni celle d'une **investigation** sur le canvas (§5).
+- Il ne rend pas un document d'enquête immuable : c'est un **résultat revérifié à chaque lecture**, pas un fait figé — la table ne stocke pas de `stale`, la vérification le remplace.
+
+## 12. Phase 5B — feed de synthèses (implémentée le 2026-09-18)
+
+Statut : **livrée** · Reprend les AC1–AC5 du §3 tels quels · N'ajoute **aucune** table ni colonne (le schéma de la 5A suffit : `state` et `stale` existaient déjà, ils n'étaient juste pas servis).
+
+### 12.1 Ce qui rend les synthèses actionnables
+
+- **Feed** : `GET /api/syntheses` — tri **par thème puis `confidence`** (high → medium → low, la plus récente d'abord à confiance égale), le tri vit **dans le dépôt** (une seule requête SQL pour l'écran et le validateur, ils ne peuvent pas diverger). Défaut de lecture `proposed` : une synthèse tranchée **quitte la file de travail** (AC3), mais reste visible avec `state=accepted|rejected|all`.
+- **Preuves citables** : chaque ligne porte son `provenance_snapshot` **avec le verdict de la vérification recalculé à cette lecture** (règle partagée `lib/quality/evidence.ts`, importée par le serveur, le validateur et les tests — source unique, même parti pris que la Phase 4). Ce qui est affiché **est** le snapshot : la copie au moment T reste lisible quand la source a disparu (AC2/AC4), et l'écran n'a jamais besoin de recomposer la provenance.
+- **Décisions** : `POST /api/syntheses/:id/accept|reject` — persistantes, **re-trancher est refusé** (`already_decided` → 409) au lieu d'être silencieux ; `not_found` → 404. Une synthèse tranchée ne revient pas au défaut de lecture, **y compris reformulée** : la dédup `content_sig` existait, et le service de synthèse **ferme la graine** dont une synthèse a été tranchée (`skipped.decided` — le test précède celui de capacité : la capacité dit « assez de propositions », la décision dit « cette graine a été jugée »).
+- **Péremption** : `lib/repositories/stale.ts` (`markSourceDependentsStale`) marque constructions **et** synthèses d'un seul appel — appelé par `DELETE /api/sources/:id` et par `scripts/reingest.mjs` (AC4). Défaut corrigé au passage : le dépôt des synthèses avait un `markStaleBySource` **que la route DELETE n'appelait pas** — supprimer une source laissait ses synthèses fraîches.
+- **AC5 vrai par construction** : accepter n'écrit **rien ailleurs** — ni `constructions` (le schéma v1.2 y impose un `suggestion_id` NOT NULL), ni le canvas. La promotion d'une synthèse sur le plan reste la décision reportée en v1.4 (§5) ; le §9 y a déjà ouvert la voie (`canvas_items.item_kind`).
+
+### 12.2 Le feed est un service de lecture, pas un écran qui calcule
+
+`lib/synth/review-service.ts` ne fait **aucun appel LLM** (comme la revue de suggestions de la Phase 3, c'est du CRUD + vérification, testé hors ligne). Les trois états d'une preuve sont **distincts et nommés** : `verified` (la citation tient), `unverified > 0` (une preuve connue ne tient plus — fragment absent, texte modifié…), `provenance_lost` (la copie JSON est illisible — il n'y a **rien à montrer**, ce n'est pas le même état qu'une preuve dont le texte a changé). L'écran (`/syntheses`, `components/synthesis-feed.tsx`) n'affiche que ce qu'il reçoit : il ne refait aucun calcul, deux lectures du même état ne peuvent pas diverger.
+
+### 12.3 Ce que cet amendement ne fait pas
+
+- **Pas de motif de rejet** : le rejet d'une synthèse est sans motif, comme le PRD le spécifie pour cette phase (celui des suggestions, lui, en a un depuis la Phase 3).
+- **Pas de promotion sur le canvas** (§5, décision v1.4) : le feed reste le seul lieu des synthèses ; accepter ne pose rien sur le plan.
+- **Pas d'exploration depuis une synthèse** : la conversation de la Phase 6 partira d'une synthèse ou du corpus ; ce feed ne fait que les rendre lisibles et trançables.
+- Le validateur (`npm run validate:phase5b`) est **en lecture seule**, comme 1B/2B/3/4 : il constate ce que l'usage a produit, il ne rejoue pas l'API — trancher depuis `/syntheses` reste un geste humain.

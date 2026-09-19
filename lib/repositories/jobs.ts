@@ -4,8 +4,17 @@ import { nowIso } from "@/lib/db/client";
 import { sha256Hex } from "@/lib/hash";
 
 // `synthesize` ajouté par la migration 003 (Phase 5A, amendement v1.3).
-// `investigation` reste réservé à la Phase 4 du PRD v1.2.
-export type JobKind = "ingest" | "summary" | "discover" | "investigation" | "synthesize";
+// `reembed` ajouté par la migration 008 : re-vectorisation du corpus après une
+// bascule de connecteur d'embeddings (Ollama ↔ API).
+// `investigation` a été câblé par la Phase 4 du PRD v1.2 (US-09) : un job par
+// suggestion, un rejeu du même job met à jour la ligne d'investigation (job.id).
+export type JobKind =
+  | "ingest"
+  | "summary"
+  | "discover"
+  | "investigation"
+  | "synthesize"
+  | "reembed";
 export type JobStatus = "pending" | "running" | "done" | "failed";
 
 export interface JobRow {
@@ -49,6 +58,12 @@ export interface JobsRepo {
   /** Réclame jusqu'à `limit` jobs pending échus ; attempts++ à la réclamation. */
   claim(limit: number, now?: Date): ClaimedJob[];
   getById(id: string): JobRow | null;
+  /**
+   * Job d'une opération logique donnée (clé d'idempotence). Utilisé par la lecture
+   * d'une investigation : l'état de la file (« en attente », « en cours », « échec
+   * structuré ») doit rester lisible avant même que le worker n'ait écrit sa ligne.
+   */
+  getByIdempotencyKey(key: string): JobRow | null;
   /** Writes de statut : exige le lease_token correspondant (worker zombie bloqué). */
   complete(id: string, leaseToken: string): boolean;
   fail(id: string, leaseToken: string, errorJson: string): boolean;
@@ -93,7 +108,13 @@ export function createJobsRepo(db: Db): JobsRepo {
         updated_at: now,
         next_run_at: now,
       });
-      return db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as JobRow;
+      // `ON CONFLICT(idempotency_key) DO UPDATE` **conserve l'id de la ligne existante** :
+      // après un upsert, la clé primaire n'est donc pas le uuid qu'on vient de tirer.
+      // Sans ce repli, `createJob` renverrait `undefined` sur toute ré-édition d'une même
+      // opération logique — et l'appelant perdrait l'id du job (qui sert par exemple à lire
+      // l'état de la file d'une investigation).
+      const inserted = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as JobRow | undefined;
+      return inserted ?? (db.prepare("SELECT * FROM jobs WHERE idempotency_key = ?").get(idempotencyKey) as JobRow);
     },
 
     claim(limit: number, now = new Date()): ClaimedJob[] {
@@ -137,6 +158,14 @@ export function createJobsRepo(db: Db): JobsRepo {
 
     getById(id: string): JobRow | null {
       return (db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as JobRow | undefined) ?? null;
+    },
+
+    getByIdempotencyKey(key) {
+      return (
+        (db.prepare("SELECT * FROM jobs WHERE idempotency_key = ?").get(key) as
+          | JobRow
+          | undefined) ?? null
+      );
     },
 
     complete(id, leaseToken): boolean {

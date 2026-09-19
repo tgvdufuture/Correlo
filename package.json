@@ -11,9 +11,15 @@
     "typecheck": "tsc --noEmit",
     "validate:corpus": "node scripts/validate-phase-1b.mjs",
     "validate:phase2b": "node scripts/validate-phase-2b.mjs",
+    "validate:phase3": "node scripts/validate-phase-3.mjs",
+    "validate:phase4": "node scripts/validate-phase-4.mjs",
+    "validate:phase5b": "node scripts/validate-phase-5b.mjs",
+    "check:browser:5b": "node scripts/browser-check-5b.mjs",
+    "check:browser:4": "node scripts/browser-check-investigation.mjs",
     "discover": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/discover.mjs",
     "eval:phase2a": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/evaluate-phase-2a.mjs",
     "reingest": "node scripts/reingest.mjs",
+    "reembed": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/reembed.mjs",
     "synth": "node scripts/synthesize.mjs",
     "eval:phase5a": "node scripts/evaluate-phase-5a.mjs"
   },
@@ -42,6 +48,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
+    "playwright-core": "^1.63.0",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^5.0.0"

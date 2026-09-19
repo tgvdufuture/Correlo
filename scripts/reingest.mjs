@@ -109,11 +109,38 @@ const tx = db.transaction(() => {
 });
 tx();
 
-const constructions = db.prepare("SELECT COUNT(*) AS n FROM constructions").get().n;
-if (constructions > 0) {
-  // PRD §205 : les Constructions survivent via provenance_snapshot
-  db.prepare("UPDATE constructions SET stale = 1 WHERE stale = 0").run();
-  console.log(`⚠ ${constructions} construction(s) marquée(s) stale = 1`);
+// PRD §205 / US-08 AC2 / Phase 5B AC4 : les Constructions **et les synthèses**
+// survivent via provenance_snapshot et passent stale = 1 — mais **seulement celles qui
+// citent une source ré-ingérée** (marquer tout le canvas périmé ferait perdre
+// l'information de péremption). Les deux requêtes sont écrites ici en SQL direct,
+// comme le reste du script (il ne charge pas les modules TS de `lib/`) : elles doivent
+// donc rester alignées sur `markSourceDependentsStale` (lib/repositories/stale.ts) et
+// la vérification est faite par le validateur, pas par la lecture.
+const markStale = db.prepare(
+  `UPDATE constructions SET stale = 1
+   WHERE stale = 0 AND EXISTS (
+     SELECT 1 FROM json_each(constructions.provenance_snapshot) je
+     WHERE json_extract(je.value, '$.source_id') = ?
+   )`
+);
+const markStaleSyntheses = db.prepare(
+  `UPDATE syntheses SET stale = 1
+   WHERE stale = 0 AND EXISTS (
+     SELECT 1 FROM json_each(syntheses.provenance_snapshot) e
+     WHERE json_extract(e.value, '$.source_id') = ?
+   )`
+);
+let staled = 0;
+let staledSyntheses = 0;
+for (const j of jobs) {
+  staled += markStale.run(j.sourceId).changes;
+  staledSyntheses += markStaleSyntheses.run(j.sourceId).changes;
+}
+if (staled > 0) {
+  console.log(`⚠ ${staled} construction(s) citant une source ré-ingérée → stale = 1`);
+}
+if (staledSyntheses > 0) {
+  console.log(`⚠ ${staledSyntheses} synthèse(s) citant une source ré-ingérée → stale = 1`);
 }
 
 console.log(`\n${jobs.length} source(s) en file — worker requis (npm run dev). Suivi…\n`);

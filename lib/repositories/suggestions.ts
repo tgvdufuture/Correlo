@@ -5,6 +5,13 @@ import type { EpistemicStatus } from "@/lib/discover/epistemic";
 export type RelationType = "analogy" | "contradiction" | "cause";
 export type SuggestionTier = "strong" | "medium" | "weak";
 export type SuggestionState = "discovered" | "shown" | "opened" | "accepted" | "rejected";
+/** Raisons de rejet (US-06 AC1) — exactement une, hors de cette liste → 400. */
+export const FEEDBACK_REASONS = ["trivial", "false", "already_known", "off_topic"] as const;
+export type FeedbackReason = (typeof FEEDBACK_REASONS)[number];
+
+export function isFeedbackReason(v: unknown): v is FeedbackReason {
+  return typeof v === "string" && (FEEDBACK_REASONS as readonly string[]).includes(v);
+}
 
 export interface SuggestionRow {
   id: string;
@@ -49,14 +56,85 @@ export type CreateResult =
       existingId?: string;
     };
 
+/** Fragment cité par une suggestion, avec de quoi l'afficher (US-05 AC1). */
+export interface FeedFragment {
+  id: string;
+  source_id: string;
+  source_title: string | null;
+  chunk_index: number;
+  locator: string;
+  text: string;
+}
+
+/** Ligne de feed : la suggestion retenue + ses 2 fragments cliquables. */
+export interface FeedItem extends SuggestionRow {
+  fragments: FeedFragment[];
+}
+
+export interface FeedOptions {
+  /**
+   * `open` (défaut) = tout sauf accepted/rejected : c'est ce que le feed expose.
+   * Une valeur d'état filtre explicitement (ex. revoir les rejetées).
+   */
+  state?: SuggestionState | "open";
+  /** Plafond de suggestions retournées (le feed est trié : les meilleures d'abord). */
+  limit?: number;
+}
+
 export interface SuggestionsRepo {
   create(s: NewSuggestion): CreateResult;
+  getById(id: string): SuggestionRow | null;
   /** Une suggestion accepted/rejected sur (pair_key, relation_type) bloque les variantes. */
   isVariantBlocked(pairKey: string, relationType: RelationType): boolean;
+  /**
+   * Feed (AC1, §3.2) : **une seule suggestion par (pair_key, relation_type)** —
+   * tier le plus élevé, tie-break la plus récente. Les fragments sont joints pour
+   * l'affichage (claim, relation, tier, statut, ≥ 2 fragments).
+   */
+  listFeed(opts?: FeedOptions): FeedItem[];
+  /**
+   * Exposition (`discovered` → `shown`) des suggestions réellement servies par le
+   * feed. Utilisée par la route GET ; sans elle la métrique « ≥ 40 % ouvertes »
+   * serait inexploitable (`shown`/`opened` n'étaient jamais posés).
+   */
+  markExposed(ids: string[]): number;
+  /** Ouverture du détail (`discovered|shown` → `opened`). Jamais de retour en arrière. */
+  markOpened(id: string): boolean;
+  /**
+   * Décision de l'utilisateur sur une suggestion, appliquée à **toutes** les
+   * variantes de (pair_key, relation_type) : c'est ce qui rend « 0 rejetée ne
+   * réapparaît, y compris sous une reformulation » vrai au niveau de la paire
+   * (§3.2 blocage de variantes) et non de la seule ligne décidée.
+   */
+  decide(
+    id: string,
+    decision: { state: "accepted" } | { state: "rejected"; reason: FeedbackReason }
+  ): number;
   listByIds(ids: string[]): SuggestionRow[];
   listAll(limit?: number): SuggestionRow[];
   countByState(): Record<SuggestionState, number>;
 }
+
+/**
+ * Ordre d'exposition des tiers : strong > medium > weak (§3.2).
+ * `suggestions` n'a pas de `created_at` (§3.3 verrouillé) : la récence du
+ * tie-break est donc l'ordre d'insertion (`rowid`), la convention déjà utilisée
+ * par `listAll`.
+ */
+const TIER_ORDER =
+  "CASE s.tier WHEN 'strong' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END";
+
+/** Représentante d'une paire : tier le plus élevé, tie-break la plus récente. */
+const FEED_REPRESENTATIVE = `
+  SELECT s.* FROM suggestions s
+  WHERE s.rowid = (
+    SELECT s2.rowid FROM suggestions s2
+    WHERE s2.pair_key = s.pair_key AND s2.relation_type = s.relation_type
+    ORDER BY CASE s2.tier WHEN 'strong' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+             s2.rowid DESC
+    LIMIT 1
+  )
+`;
 
 export function createSuggestionsRepo(db: Db): SuggestionsRepo {
   return {
@@ -108,6 +186,14 @@ export function createSuggestionsRepo(db: Db): SuggestionsRepo {
       }
     },
 
+    getById(id) {
+      return (
+        (db.prepare("SELECT * FROM suggestions WHERE id = ?").get(id) as
+          | SuggestionRow
+          | undefined) ?? null
+      );
+    },
+
     isVariantBlocked(pairKey, relationType) {
       return !!db
         .prepare(
@@ -116,6 +202,81 @@ export function createSuggestionsRepo(db: Db): SuggestionsRepo {
            LIMIT 1`
         )
         .get(pairKey, relationType);
+    },
+
+    listFeed(opts = {}) {
+      const state = opts.state ?? "open";
+      const limit = opts.limit ?? 200;
+      const where =
+        state === "open" ? "s.state NOT IN ('accepted', 'rejected')" : "s.state = @state";
+      const rows = db
+        .prepare(
+          `${FEED_REPRESENTATIVE}
+           AND ${where}
+           ORDER BY ${TIER_ORDER}, s.rowid DESC
+           LIMIT @limit`
+        )
+        .all(state === "open" ? { limit } : { state, limit }) as SuggestionRow[];
+      if (rows.length === 0) return [];
+
+      // fragments des 2 côtés, en une requête (jointure sources pour le titre)
+      const ids = [...new Set(rows.flatMap((r) => [r.fragment_a_id, r.fragment_b_id]))];
+      const placeholders = ids.map(() => "?").join(",");
+      const frags = db
+        .prepare(
+          `SELECT f.id, f.source_id, s.title AS source_title, f.chunk_index, f.locator, f.text
+           FROM fragments f LEFT JOIN sources s ON s.id = f.source_id
+           WHERE f.id IN (${placeholders})`
+        )
+        .all(...ids) as FeedFragment[];
+      const byId = new Map(frags.map((f) => [f.id, f]));
+      return rows.map((r) => ({
+        ...r,
+        fragments: [byId.get(r.fragment_a_id), byId.get(r.fragment_b_id)].filter(
+          (f): f is FeedFragment => !!f
+        ),
+      }));
+    },
+
+    markExposed(ids) {
+      if (ids.length === 0) return 0;
+      const placeholders = ids.map(() => "?").join(",");
+      return db
+        .prepare(
+          `UPDATE suggestions SET state = 'shown'
+           WHERE state = 'discovered' AND id IN (${placeholders})`
+        )
+        .run(...ids).changes;
+    },
+
+    markOpened(id) {
+      return (
+        db
+          .prepare(
+            `UPDATE suggestions SET state = 'opened'
+             WHERE id = ? AND state IN ('discovered', 'shown')`
+          )
+          .run(id).changes === 1
+      );
+    },
+
+    decide(id, decision) {
+      // La décision porte sur la paire, pas sur la ligne : toutes les variantes
+      // de (pair_key, relation_type) basculent ensemble (§3.2).
+      const target = db
+        .prepare("SELECT pair_key, relation_type FROM suggestions WHERE id = ?")
+        .get(id) as { pair_key: string; relation_type: RelationType } | undefined;
+      if (!target) return 0;
+      const patch =
+        decision.state === "accepted"
+          ? { state: "accepted" as const, feedback_reason: null }
+          : { state: "rejected" as const, feedback_reason: decision.reason };
+      return db
+        .prepare(
+          `UPDATE suggestions SET state = @state, feedback_reason = @feedback_reason
+           WHERE pair_key = @pair_key AND relation_type = @relation_type`
+        )
+        .run({ ...patch, pair_key: target.pair_key, relation_type: target.relation_type }).changes;
     },
 
     listByIds(ids) {

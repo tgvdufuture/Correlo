@@ -3,8 +3,12 @@ import type { EmbedBatcher, LlmProvider } from "@/lib/llm/types";
 import { LlmError, LlmNetworkError, LlmOutputError } from "@/lib/llm/errors";
 
 /**
- * Embeddings Ollama locaux (API /api/embed) — PRD : nomic-embed-text uniquement,
- * aucun embedding cloud.
+ * Embeddings Ollama locaux (API `/api/embed`) : `nomic-embed-text`, 768 dims.
+ *
+ * C'est l'espace vectoriel **par défaut** (`EMBED_PROVIDER=ollama`). Le connecteur API
+ * (`lib/llm/api-embed.ts`) est l'alternative quand Ollama ne tourne pas ; les deux
+ * espaces ne sont pas comparables, d'où l'invariant de `embedding-space.ts` et la
+ * commande `npm run reembed`.
  */
 export class OllamaProvider implements LlmProvider, EmbedBatcher {
   constructor(private opts: { baseUrl: string; model: string }) {}

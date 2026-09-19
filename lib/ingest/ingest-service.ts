@@ -34,6 +34,26 @@ interface IngestPayload {
   page_map?: PageMapEntry[];
 }
 
+/**
+ * Réglages du run `discover` déclenché par une ingestion réussie (canvas-atelier).
+ *
+ * Un fichier déposé n'a de liens qu'une fois ses fragments **et leurs embeddings**
+ * en base : c'est donc la fin de l'ingestion — et non le dépôt — qui rend la
+ * découverte possible. Le run est **focalisé** sur la source déposée : on cherche
+ * ses liens à elle, avec un budget de paires borné, pas un balayage du corpus.
+ */
+export interface AutoDiscoverSettings {
+  enabled: boolean;
+  chatModel: string;
+  samplerVersion: string;
+  promptVersion: string;
+  maxPairs: number;
+  maxPairsPerSource: number;
+  batchSize: number;
+  maxFragmentChars: number;
+  interBatchDelayMs: number;
+}
+
 export interface IngestDeps {
   db: Db;
   sources: SourcesRepo;
@@ -41,6 +61,8 @@ export interface IngestDeps {
   jobs: JobsRepo;
   embedder: EmbeddingService;
   chatModel: string;
+  /** Absent = aucune découverte automatique (CLI, tests unitaires). */
+  discover?: AutoDiscoverSettings;
   /** Injectable pour les tests (fetch + Readability réels par défaut). */
   fetchUrl?: typeof extractUrlText;
 }
@@ -148,6 +170,54 @@ export class IngestService {
 
     // Chaînage : le résumé (routage, non citable) part après ingestion réussie.
     this.enqueueSummary(source.id);
+    // puis la découverte, qui a besoin des embeddings tout juste écrits
+    this.enqueueDiscovery(source.id);
+  }
+
+  /**
+   * Met en file le run `discover` du fichier déposé, **sans jamais en déclencher
+   * deux fois le même** : la clé d'idempotence porte l'empreinte du fichier et les
+   * versions (échantillonneur, prompt, modèle), donc ré-importer le même contenu ne
+   * relance rien, mais changer de prompt ou de modèle relance — c'est voulu.
+   */
+  private enqueueDiscovery(sourceId: string): void {
+    const settings = this.deps.discover;
+    if (!settings?.enabled) return;
+    const source = this.deps.sources.getById(sourceId);
+    if (!source) return;
+    // corpus éligible : les sources qui ont des fragments. Un lien relie **deux**
+    // fichiers : tant qu'il n'y en a qu'un, il n'y a rien à découvrir.
+    const sourceIds = (
+      this.deps.db
+        .prepare("SELECT DISTINCT source_id AS id FROM fragments ORDER BY source_id")
+        .all() as { id: string }[]
+    ).map((r) => r.id);
+    if (sourceIds.length < 2) return;
+
+    const runId = `auto-${sourceId.slice(0, 8)}-${source.content_hash.slice(0, 12)}`;
+    this.deps.jobs.createJob({
+      kind: "discover",
+      payload: {
+        run_id: runId,
+        source_ids: sourceIds,
+        sampler: "diversified",
+        focus_source_ids: [sourceId],
+        max_pairs: settings.maxPairs,
+        max_pairs_per_source: settings.maxPairsPerSource,
+        batch_size: settings.batchSize,
+        max_fragment_chars: settings.maxFragmentChars,
+        inter_batch_delay_ms: settings.interBatchDelayMs,
+      },
+      sourceId,
+      idempotencyKey: idempotencyKey([
+        "discover-auto",
+        sourceId,
+        source.content_hash,
+        settings.samplerVersion,
+        settings.promptVersion,
+        settings.chatModel,
+      ]),
+    });
   }
 
   private enqueueSummary(sourceId: string): void {

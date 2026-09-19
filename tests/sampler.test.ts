@@ -114,6 +114,46 @@ describe("sampler Q20", () => {
     expect(a1Pairs.slice(0, 6).map((p) => p.bId)).toEqual(["b1", "c1", "b2", "c2", "b3", "b4"]);
   });
 
+  it("focusSourceIds : le fichier mis en avant est examiné en premier — sans lui il ne l'est jamais", () => {
+    // 6 sources, budget de 4 paires à 1 par source : sans focus, les 4 premières
+    // sources (ordre alphabétique) mangent tout le budget
+    const corpus: DiscoveryFragment[] = [];
+    for (let s = 1; s <= 6; s++) {
+      for (let i = 0; i < 3; i++) {
+        corpus.push(frag(`s${s}f${i}`, `s${s}`, i, [1, s * 0.1, i * 0.01, 0]));
+      }
+    }
+    const base = {
+      fragments: corpus,
+      seedHex: makeSeed("h", "focus"),
+      sampler: "diversified" as const,
+      maxPairs: 4,
+      maxPairsPerSource: 1,
+    };
+
+    const without = samplePairs(base);
+    expect(without.map((p) => p.aSource)).toEqual(["s1", "s2", "s3", "s4"]);
+
+    // le fichier fraîchement déposé passe devant : c'est **lui** qu'on veut comparer
+    const withFocus = samplePairs({ ...base, focusSourceIds: ["s6"] });
+    expect(withFocus).toHaveLength(4);
+    expect(withFocus[0].aSource).toBe("s6");
+    expect(withFocus.filter((p) => p.aSource === "s6")).toHaveLength(1);
+    // le reste du corpus n'est pas oublié : le budget restant continue ailleurs
+    expect(new Set(withFocus.map((p) => p.aSource)).size).toBe(4);
+  });
+
+  it("focusSourceIds ne change pas la sélection quand il est vide (runs manuels inchangés)", () => {
+    const corpus = [
+      frag("a1", "s1", 0, [1, 0, 0, 0]),
+      frag("a2", "s1", 1, [0.9, 0.2, 0, 0]),
+      frag("b1", "s2", 0, [0.8, 0.3, 0, 0]),
+      frag("b2", "s2", 1, [0.2, 0.9, 0.1, 0]),
+    ];
+    const base = { fragments: corpus, seedHex: makeSeed("h", "r"), sampler: "diversified" as const };
+    expect(samplePairs({ ...base, focusSourceIds: [] })).toEqual(samplePairs(base));
+  });
+
   it("corpus d'une seule source : aucune paire", () => {
     const corpus = [frag("a1", "s1", 0, [1, 0, 0, 0]), frag("a2", "s1", 1, [0.9, 0.1, 0, 0])];
     expect(

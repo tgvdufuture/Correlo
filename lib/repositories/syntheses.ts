@@ -55,8 +55,43 @@ export type CreateSynthesisResult =
       reason: "theme_missing" | "evidence_missing" | "intra_source" | "duplicate";
     };
 
+/**
+ * Ligne du feed : la synthèse **et** son thème, joints. Le regroupement affiché par
+ * l'écran (Phase 5B AC1 « triées par thème puis `confidence` ») est une propriété de la
+ * lecture, pas du modèle : la joindre ici évite un N+1 côté service et garantit que le
+ * tri SQL et l'étiquette affichée viennent de la même ligne.
+ */
+export interface SynthesisFeedRow extends SynthesisRow {
+  theme_label: string;
+  theme_run_id: string;
+  theme_seed: string;
+  /** Rang du thème dans son run — l'ordre d'affichage (stable, indépendant des dates). */
+  theme_rank: number;
+}
+
+/**
+ * États exposés par le feed. `all` sert au validateur et à la vue d'ensemble ; le
+ * défaut est `proposed` : une synthèse tranchée ne revient pas dans la file de travail
+ * (AC3 — accepter/rejeter est persistant).
+ */
+export type SynthesisFeedState = SynthesisState | "all";
+
+export interface SynthesisFeedOptions {
+  state?: SynthesisFeedState;
+  limit?: number;
+}
+
 export interface SynthesesRepo {
   create(s: NewSynthesis): CreateSynthesisResult;
+  getById(id: string): SynthesisRow | null;
+  /** Même forme que `listFeed`, pour une seule ligne (la route d'un refus/acceptation). */
+  getFeedById(id: string): SynthesisFeedRow | null;
+  /**
+   * Feed (AC1) : une seule ligne par (`theme_id`, `content_sig`) — c'est `content_sig`
+   * UNIQUE qui l'impose — triée par **thème puis `confidence`** (high → low), la plus
+   * récente d'abord à confiance égale.
+   */
+  listFeed(opts?: SynthesisFeedOptions): SynthesisFeedRow[];
   listByTheme(themeId: string): SynthesisRow[];
   /** Synthèses tranchées d'un thème (accepted/rejected) — sert au blocage des variantes. */
   listDecidedByTheme(themeId: string): SynthesisRow[];
@@ -72,6 +107,20 @@ export interface SynthesesRepo {
    */
   markStaleBySource(sourceId: string): number;
 }
+
+/**
+ * Sélection du feed : la synthèse et son thème joints, dans l'ordre d'affichage.
+ * Partagée entre `listFeed` et `getFeedById` pour que deux lectures ne puissent pas
+ * rendre la même ligne sous deux formes différentes.
+ */
+const FEED_SELECT = `
+  SELECT s.*, t.label AS theme_label, t.run_id AS theme_run_id, t.seed AS theme_seed,
+    t.rowid AS theme_rank
+  FROM syntheses s
+  JOIN themes t ON t.id = s.theme_id
+  WHERE (@state = 'all' OR s.state = @state)
+  ORDER BY t.rowid, CASE s.confidence WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+    s.created_at DESC, s.rowid DESC, s.text`;
 
 export function createSynthesesRepo(db: Db): SynthesesRepo {
   return {
@@ -127,6 +176,33 @@ export function createSynthesesRepo(db: Db): SynthesesRepo {
         }
         throw e;
       }
+    },
+
+    getById(id: string): SynthesisRow | null {
+      return (
+        (db.prepare("SELECT * FROM syntheses WHERE id = ?").get(id) as
+          | SynthesisRow
+          | undefined) ?? null
+      );
+    },
+
+    listFeed(opts = {}): SynthesisFeedRow[] {
+      const state = opts.state ?? "proposed";
+      const limit = opts.limit ?? 200;
+      // ordre : thème (rang dans le run), puis confiance décroissante, puis récence.
+      // `text` départage deux lignes identiques par ailleurs — sans lui, deux synthèses
+      // de même thème et même confiance pourraient changer d'ordre d'une lecture à
+      // l'autre, donc s'afficher sous les yeux de l'utilisateur. (Le tri SQL n'est pas
+      // spécifié par SQLite pour les ex æquo, une pagination l'exigerait.)
+      return db.prepare(`${FEED_SELECT} LIMIT @limit`).all({ state, limit }) as SynthesisFeedRow[];
+    },
+
+    getFeedById(id: string): SynthesisFeedRow | null {
+      return (
+        (db.prepare(`${FEED_SELECT} AND s.id = @id`).get({ state: "all", id }) as
+          | SynthesisFeedRow
+          | undefined) ?? null
+      );
     },
 
     listByTheme(themeId: string): SynthesisRow[] {

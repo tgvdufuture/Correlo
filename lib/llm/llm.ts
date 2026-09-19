@@ -4,11 +4,13 @@ import { GroqProvider } from "@/lib/llm/groq";
 import { OllamaChatProvider } from "@/lib/llm/ollama-chat";
 import { OllamaProvider } from "@/lib/llm/ollama";
 import { HybridProvider } from "@/lib/llm/hybrid";
-import { EMBEDDING_VERSION } from "@/lib/llm/embedding-codec";
+import { ApiEmbedProvider } from "@/lib/llm/api-embed";
+import { getEmbeddingSpace } from "@/lib/llm/active-space";
+import type { EmbeddingSpace } from "@/lib/llm/embedding-space";
 
-export const EMBEDDING_MODEL_ENV = "OLLAMA_EMBED_MODEL";
+export { getEmbeddingSpace };
 
-/** Provider composé : chat = LLM_CHAT_PROVIDER (groq|ollama), embed = Ollama. */
+/** Provider composé : chat = LLM_CHAT_PROVIDER (groq|ollama), embed = EMBED_PROVIDER. */
 export function getLlm(): LlmProvider {
   const c = getConfig();
   const chatProvider =
@@ -25,10 +27,23 @@ export function getLlm(): LlmProvider {
           baseUrl: c.GROQ_BASE_URL,
           label: chatEndpointLabel(c.GROQ_BASE_URL),
         });
-  const embedProvider = new OllamaProvider({
-    baseUrl: c.OLLAMA_BASE_URL,
-    model: c.OLLAMA_EMBED_MODEL,
-  });
+  // Le connecteur d'embeddings est un choix de service, pas un fallback : Ollama
+  // local ou endpoint OpenAI-compatible. Les vecteurs des deux ne sont pas
+  // comparables — l'app refuse de les mélanger plutôt que de deviner.
+  const embedProvider =
+    c.EMBED_PROVIDER === "api"
+      ? new ApiEmbedProvider({
+          apiKey: c.NVIDIA_API_KEY,
+          model: c.NVIDIA_EMBED_MODEL,
+          baseUrl: c.NVIDIA_BASE_URL,
+          inputType: c.NVIDIA_EMBED_INPUT_TYPE === "off" ? undefined : c.NVIDIA_EMBED_INPUT_TYPE,
+          timeoutMs: c.NVIDIA_EMBED_TIMEOUT_SECONDS * 1000,
+          label: chatEndpointLabel(c.NVIDIA_BASE_URL),
+        })
+      : new OllamaProvider({
+          baseUrl: c.OLLAMA_BASE_URL,
+          model: c.OLLAMA_EMBED_MODEL,
+        });
   return new HybridProvider(chatProvider, embedProvider);
 }
 
@@ -75,12 +90,7 @@ export function isGroqKeyMissing(): boolean {
   return c.LLM_CHAT_PROVIDER === "groq" && !c.GROQ_API_KEY && c.GROQ_BASE_URL.includes("api.groq.com");
 }
 
-/** Métadonnées d'embedding persistées sur chaque fragment. */
-export function embeddingMeta() {
-  const c = getConfig();
-  return {
-    model: c.OLLAMA_EMBED_MODEL,
-    dimensions: 768,
-    version: EMBEDDING_VERSION,
-  };
+/** Métadonnées d'embedding persistées sur chaque fragment (espace actif). */
+export function embeddingMeta(): EmbeddingSpace {
+  return getEmbeddingSpace();
 }
