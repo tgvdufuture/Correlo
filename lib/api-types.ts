@@ -302,6 +302,181 @@ export interface InvestigationResponse {
 }
 
 /* ------------------------------------------------------------------ *
+ * Conversation (Phase 6) — miroir de lib/agent/conversation-review.ts.
+ * ------------------------------------------------------------------ */
+
+export type {
+  ConversationAction,
+  ConversationAnchorKind,
+  ConversationStatus,
+  ConversationStep,
+  MessageRole,
+} from "@/lib/agent/conversation-types";
+export {
+  ANSWER_REJECTION_LABEL,
+  CONVERSATION_ACTION_LABEL,
+} from "@/lib/agent/conversation-types";
+// modules **purs** : `web-guard` (qui importe `node:dns`) et `conversation-citations` (qui
+// lit la base) ne peuvent pas entrer dans un bundle client — le build l'a attrapé
+export { WEB_REFUSAL_LABEL } from "@/lib/agent/web-refusals";
+export { WEB_PROBLEM_LABEL } from "@/lib/agent/conversation-types";
+
+/**
+ * Une provenance d'affirmation, **vérifiée à cette lecture**. `verified: false` ⇒ elle
+ * n'appuie plus rien : l'affirmation est affichée « non sourcée », le texte copié au
+ * moment T restant consultable (AC1).
+ */
+export interface FragmentProvenanceView {
+  kind: "fragment";
+  index: number;
+  fragment_id: string;
+  source_id: string;
+  source_title: string | null;
+  locator: string;
+  text: string;
+  verified: boolean;
+  /** Absent quand `verified` est vrai. */
+  problem?: "fragment_absent" | "source_modifiee" | "texte_modifie";
+}
+
+/**
+ * Une provenance **web** : une copie **datée**, vérifiée contre la lecture du tour —
+ * jamais re-fetchée à l'affichage (AC7). L'URL et la date sont montrées ensemble : c'est
+ * ce que « copie du jour » veut dire pour qui lit.
+ */
+export interface WebProvenanceView {
+  kind: "url";
+  index: number;
+  url: string;
+  title: string | null;
+  retrieved_at: string;
+  excerpt: string;
+  verified: boolean;
+  /** Absent quand `verified` est vrai. */
+  problem?: "resultat_absent" | "page_non_lue" | "copie_modifiee" | "date_invalide";
+}
+
+export type ClaimProvenanceView = FragmentProvenanceView | WebProvenanceView;
+
+export interface ConversationClaimView {
+  text: string;
+  provenance: ClaimProvenanceView[];
+  /** Au moins une provenance survit — sinon l'affirmation est montrée « non sourcée ». */
+  sourced: boolean;
+}
+
+/** Le tour tel qu'il s'affiche : les étapes de l'agent, pas le catalogue (il est dans la ligne). */
+export interface ConversationWebResultView {
+  index: number;
+  url: string;
+  title: string | null;
+  snippet: string | null;
+  found_at: string;
+  read: boolean;
+  retrieved_at?: string;
+  failure?: string;
+}
+
+export interface ConversationRunView {
+  prompt_version: string;
+  chat_model: string;
+  step_budget: number;
+  web_budget: number;
+  internal_steps: number;
+  web_steps: number;
+  llm_calls: number;
+  steps_from_cache: number;
+  history_messages: number;
+  web_unlocked: boolean;
+  web_unlock_min_evidence: number;
+  web_unlock_reason?: string;
+  web_results: ConversationWebResultView[];
+  anchor_missing: boolean;
+  steps: import("@/lib/agent/conversation-types").ConversationStep[];
+  failure?: string;
+}
+
+export interface ConversationMessageView {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  status: "pending" | "done" | "failed";
+  created_at: string;
+  claims: ConversationClaimView[];
+  unsourced: number;
+  unverified: number;
+  failure?: string;
+  run: ConversationRunView | null;
+}
+
+export interface ConversationAnchorView {
+  kind: "synthesis" | "corpus";
+  ref: string | null;
+  /** Énoncé de la synthèse ancrée, tronqué — `null` si elle a disparu. */
+  label: string | null;
+}
+
+export interface ConversationView {
+  id: string;
+  title: string;
+  anchor: ConversationAnchorView;
+  chat_model: string;
+  created_at: string;
+  updated_at: string;
+  /** Une question attend sa réponse (en file ou en cours) — l'écran suit ce champ. */
+  awaiting_reply: boolean;
+  messages: ConversationMessageView[];
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  anchor_kind: "synthesis" | "corpus";
+  anchor_ref: string | null;
+  created_at: string;
+  updated_at: string;
+  messages: number;
+  last: { role: "user" | "assistant"; text: string; status: "pending" | "done" | "failed" } | null;
+  pending: boolean;
+}
+
+export const CONVERSATION_STATUS_LABEL: Record<ConversationMessageView["status"], string> = {
+  pending: "Réponse en cours",
+  done: "Réponse rendue",
+  failed: "Tour échoué",
+};
+
+/**
+ * Pourquoi un tour n'a pas rendu de réponse. Le motif **nomme la règle** qui a refusé :
+ * un écran qui afficherait « échec » sans dire laquelle laisserait croire à une panne, alors
+ * que chaque refus est une décision (et que le modèle, lui, a pu se reprendre).
+ */
+export const CONVERSATION_FAILURE_LABEL: Record<string, string> = {
+  step_budget_exhausted: "Le budget d'étapes est épuisé avant qu'une réponse soit acceptée.",
+  reponse_sans_exploration: "L'agent a voulu répondre sans avoir rien lu du corpus.",
+  reponse_sans_aucune_preuve: "Aucune affirmation n'était appuyée par un fragment du corpus.",
+  reponse_hors_catalogue: "Une citation portait sur un fragment que l'agent n'avait jamais vu.",
+  reponse_web_non_lue: "Une citation portait sur une page que l'agent n'avait pas lue pendant ce tour.",
+  reponse_web_ignoree:
+    "Le corpus ne suffisait pas (outils web exposés) et l'agent a répondu sans rien chercher dehors.",
+  reponse_avec_repere_technique:
+    "La réponse parlait du protocole (indice de catalogue) au lieu du sujet.",
+  sortie_invalide: "Le modèle n'a pas rendu d'action exploitable.",
+};
+
+/**
+ * Ce que veut dire un tour « exposé au web » : la décision est un **constat serveur**
+ * (§13.4), et l'écran doit dire lequel — un `false` muet n'apprend rien à qui regarde.
+ */
+export const WEB_UNLOCK_REASON_LABEL: Record<string, string> = {
+  acces_desactive: "accès web désactivé (WEB_ACCESS=off)",
+  connecteur_absent: "aucun connecteur de recherche configuré",
+  constat_en_attente: "constat pas encore fait (aucune exploration aboutie)",
+  corpus_suffisant: "le corpus suffisait",
+  corpus_insuffisant: "corpus insuffisant — outils web exposés",
+};
+
+/* ------------------------------------------------------------------ *
  * Espace vectoriel du corpus (miroir de lib/llm/embedding-space.ts).
  * ------------------------------------------------------------------ */
 

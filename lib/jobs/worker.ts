@@ -21,7 +21,13 @@ import { createDiscoverRunsRepo, type DiscoverRunsRepo } from "@/lib/repositorie
 import { createSuggestionsRepo } from "@/lib/repositories/suggestions";
 import { SynthesisService, type SynthesisRunResult } from "@/lib/synth/synth-service";
 import { InvestigationService } from "@/lib/agent/investigation-service";
+import {
+  ConversationService,
+  type ConversationRunResult,
+} from "@/lib/agent/conversation-service";
 import { createInvestigationsRepo } from "@/lib/repositories/investigations";
+import { createWebTools } from "@/lib/agent/web-tools";
+import { createConversationsRepo } from "@/lib/repositories/conversations";
 import { createThemesRepo } from "@/lib/repositories/themes";
 import { createSynthesesRepo } from "@/lib/repositories/syntheses";
 import { createPromptCache } from "@/lib/repositories/llm-cache";
@@ -45,6 +51,8 @@ export interface WorkerDeps {
   reembed?: ReembedRunner;
   /** Kind investigation (Phase 4, US-09) — optionnel pour les tests existants. */
   investigation?: InvestigationService;
+  /** Kind conversation (Phase 6) — optionnel pour les tests existants. */
+  conversation?: ConversationService;
   maxAttempts?: number;
   concurrency?: number;
 }
@@ -117,6 +125,9 @@ export class Worker {
       } else if (job.kind === "investigation") {
         if (!this.deps.investigation) throw new Error("kind investigation non câblé");
         await this.runInvestigation(job, this.deps.investigation);
+      } else if (job.kind === "conversation") {
+        if (!this.deps.conversation) throw new Error("kind conversation non câblé");
+        await this.runConversation(job, this.deps.conversation);
       } else throw new Error(`kind de job inconnu : ${job.kind}`);
     } catch (err) {
       if (err instanceof JobStolenError) return; // lease repris ailleurs : ne rien écrire
@@ -544,6 +555,81 @@ export class Worker {
       throw new JobStolenError();
     }
   }
+
+  /**
+   * Job conversation (Phase 6) : un tour, ≤ 5 étapes internes, réponse **assemblée par
+   * le serveur** à partir des affirmations du modèle.
+   *
+   * Pas de checkpoint, même raison que l'investigation : le tour fait au plus 5 appels et
+   * le cache de prompt rend un rejeu gratuit et identique, donc une reprise au milieu
+   * n'apporterait rien qu'un second chemin de code. L'`id` de la réponse est celui du job :
+   * un rejeu met à jour la même ligne au lieu d'empiler une seconde réponse.
+   *
+   * Un tour qui n'a pas répondu est un **résultat**, pas une panne : la ligne `messages`
+   * passe `failed` avec son motif, et le job reste `done`. L'erreur du job est réservée aux
+   * vraies pannes (conversation disparue, provider en échec).
+   */
+  private async runConversation(job: ClaimedJob, service: ConversationService): Promise<void> {
+    const payload = JSON.parse(job.payload) as {
+      conversation_id: string;
+      question_message_id: string;
+      question: string;
+      max_steps?: number;
+      page_size?: number;
+      catalogue_size?: number;
+      max_fragment_chars?: number;
+      history_messages?: number;
+    };
+    if (!payload.conversation_id || !payload.question_message_id || !payload.question) {
+      throw new Error(
+        "payload conversation invalide : conversation_id, question_message_id et question requis"
+      );
+    }
+    // lease renouvelé : le tour enchaîne plusieurs appels LLM lents
+    const leaseTimer = setInterval(() => {
+      this.deps.jobs.renewLease(job.id, job.lease_token as string);
+    }, 30_000);
+    let result: ConversationRunResult;
+    try {
+      result = await service.run(payload.conversation_id, {
+        messageId: job.id,
+        questionMessageId: payload.question_message_id,
+        question: payload.question,
+        maxSteps: payload.max_steps,
+        pageSize: payload.page_size,
+        catalogueSize: payload.catalogue_size,
+        maxFragmentChars: payload.max_fragment_chars,
+        historyMessages: payload.history_messages,
+      });
+    } finally {
+      clearInterval(leaseTimer);
+    }
+    const summary = {
+      message_id: result.messageId,
+      conversation_id: payload.conversation_id,
+      status: result.status,
+      steps: result.steps,
+      // budgets séparés (AC5′) : un tour se juge sur ce qu'il a consommé de chaque côté
+      internal_steps: result.internalSteps,
+      web_steps: result.webSteps,
+      web_unlocked: result.webUnlocked,
+      web_unlock_reason: result.webUnlockReason,
+      llm_calls: result.llmCalls,
+      llm_calls_from_cache: result.llmCallsFromCache,
+      claims: result.claims,
+      unsourced: result.unsourced,
+      failure: result.failure,
+    };
+    this.deps.jobs.updateCheckpoint(
+      job.id,
+      job.lease_token as string,
+      JSON.stringify({ done: true }),
+      JSON.stringify(summary)
+    );
+    if (!this.deps.jobs.complete(job.id, job.lease_token as string)) {
+      throw new JobStolenError();
+    }
+  }
 }
 
 /** `run_id` d'un payload discover (payload illisible ⇒ undefined, jamais d'exception ici). */
@@ -626,10 +712,13 @@ export function createWorker(): Worker {
   // Métadonnées de run (Phase 2B, AC1) : la base porte l'identité des runs discover,
   // rejouables à l'identique (PRIMARY KEY run_id, upsert au rejeu).
   const discoverRuns = createDiscoverRunsRepo(db);
+  // Dépôt des synthèses partagé : le moteur de la 5A l'écrit, la conversation (Phase 6)
+  // lit les preuves de la synthèse ancrée — une seule instance, une seule lecture.
+  const syntheses = createSynthesesRepo(db);
   const synthesize = new SynthesisService({
     db,
     themes: createThemesRepo(db),
-    syntheses: createSynthesesRepo(db),
+    syntheses,
     chat: llm,
     chatModel: getChatModelName(),
     chatSignature,
@@ -649,6 +738,33 @@ export function createWorker(): Worker {
     chatSignature,
     promptCache,
   });
+  // Outils web (Phase 6, §13.4) : assemblés **une fois**, depuis les réglages. Sans
+  // connecteur ou avec `WEB_ACCESS=off`, l'objet existe quand même (`enabled: false`) : le
+  // tour enregistre alors *pourquoi* le web n'a pas été exposé, au lieu de laisser un
+  // `false` muet que personne ne peut interpréter.
+  const webTools = createWebTools({
+    access: config.WEB_ACCESS,
+    provider: config.SEARCH_PROVIDER,
+    exaApiKey: config.EXA_API_KEY,
+    maxSteps: config.WEB_MAX_STEPS,
+    unlockMinEvidence: config.WEB_UNLOCK_MIN_EVIDENCE,
+    searchResults: config.WEB_SEARCH_RESULTS,
+  });
+  // Conversation (Phase 6) : même cache de prompt que les autres kinds — le rejeu d'un
+  // tour (reprise après un 503, `POST` rejoué) ne rappelle pas le modèle, donc la réponse
+  // enregistrée reste celle du premier passage.
+  const conversation = new ConversationService({
+    db,
+    conversations: createConversationsRepo(db),
+    syntheses,
+    fragments,
+    sources,
+    chat: llm,
+    chatModel: getChatModelName(),
+    chatSignature,
+    promptCache,
+    web: webTools,
+  });
   // Re-vectorisation : le worker porte le même `embedder` que l'ingestion, donc la
   // bascule se fait dans l'espace exact que les prochains dépôts utiliseront.
   const reembed: ReembedRunner = {
@@ -667,5 +783,6 @@ export function createWorker(): Worker {
     synthesize,
     reembed,
     investigation,
+    conversation,
   });
 }

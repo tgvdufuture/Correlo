@@ -1,0 +1,30 @@
+import { ConversationView } from "@/components/conversation-view";
+
+/**
+ * Une conversation, à son adresse (Phase 6).
+ *
+ * Rien n'est chargé ici côté serveur : la lecture passe par `GET /api/conversations/:id`,
+ * qui **revérifie les provenances à cette lecture**. La lire deux fois (une fois au
+ * prérendu, une fois au montage) donnerait deux verdicts possibles pour le même écran —
+ * et c'est précisément ce que la maison refuse depuis la Phase 4.
+ *
+ * L'ancre passée ici n'est qu'un repli : dès que la conversation est chargée, c'est celle
+ * de la base qui s'affiche (elle seule sait si la synthèse d'origine existe encore).
+ */
+export default async function ConversationPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  return (
+    <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-10">
+      <header className="mb-6">
+        <h1 className="text-2xl font-semibold tracking-tight">Conversation</h1>
+        <p className="text-sm text-muted-foreground">
+          Chaque affirmation porte ses preuves, revérifiées contre le corpus à cette lecture.
+        </p>
+      </header>
+      <ConversationView
+        conversationId={id}
+        initialAnchor={{ kind: "corpus", ref: null, label: null }}
+      />
+    </main>
+  );
+}

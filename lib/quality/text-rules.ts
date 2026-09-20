@@ -14,6 +14,9 @@
  * de règles (`TextRuleProfile`) à un texte. Les profils vivent près de leur phase
  * (`CLAIM_TEXT_PROFILE` ici car 2A est le profil historique, `SYNTHESIS_TEXT_PROFILE`
  * dans `lib/synth/rules.ts`).
+ *
+ * Il expose en plus `mentionsProtocolReference`, la famille **indexée** des repères de
+ * protocole (« le fragment [0] affirme que… »), née avec la conversation de la Phase 6.
  */
 
 /** Raisons pour lesquelles un texte est disqualifié. */
@@ -69,6 +72,36 @@ const PLACEHOLDER_PATTERNS = [
   /\b(?:premier|second|deuxieme|deuxième)\s+(?:fragment|texte|passage)\b/i,
   /(^|[\s(:«"])[ab](?=[\s,;:)»"]|$)\s*(?:soutient|affirme|declare|déclare|montre|explique|propose|juge|defend|défend|contredit|enonce|énonce|decrit|décrit)\b/i,
 ];
+
+/**
+ * Repères de **protocole** dans la prose d'une réponse conversationnelle (Phase 6).
+ *
+ * Mesuré sur le premier tour réel de la Phase 6 (2026-09-19, base jetable, `qwen3.8-27b`) :
+ * la réponse affichée commençait par « **Le fragment [0] affirme que** la vérité ne peut
+ * être anéantie… Le fragment [1] indique que… ». Or `messages.text` **est** l'union des
+ * affirmations : l'indice de catalogue est un protocole serveur (le modèle ne voit jamais
+ * d'identifiant de fragment), il n'a rien à faire dans ce qui est lu par un humain. Les
+ * `PLACEHOLDER_PATTERNS` historiques ne l'attrapaient pas : ils visent « fragment A »,
+ * « Texte 1 »… pas la famille **indexée** `[0]`, qui n'existe qu'en Phase 6.
+ *
+ * Volontairement **hors** des profils partagés (`rejectText`) : y ajouter un motif
+ * disqualifierait rétroactivement des claims 2A et des synthèses 5A déjà mesurés et
+ * rendrait leurs runs non comparables. Cette famille est donc appliquée par la
+ * conversation seule, via `mentionsProtocolReference`.
+ */
+const CATALOGUE_REFERENCE_PATTERNS = [
+  /\[\s*\d+\s*\]/, // « le fragment [0] affirme que… », « voir [12] »
+  /\b(?:fragments?|extraits?|passages?|documents?)\s+(?:n[°o]\s*)?\d+\b/i, // « le fragment 2 », « document n°3 »
+];
+
+/**
+ * Vrai si le texte parle du **protocole** au lieu du sujet : indice de catalogue, repère
+ * générique (« Texte 1 », « A soutient que »). C'est le refus `reponse_avec_repere_technique`
+ * de la conversation (recoverable : le modèle réécrit ce qu'il voulait dire).
+ */
+export function mentionsProtocolReference(text: string): boolean {
+  return [...PLACEHOLDER_PATTERNS, ...CATALOGUE_REFERENCE_PATTERNS].some((re) => re.test(text));
+}
 
 const EN_STOPWORDS = new Set(
   `the of and is are that with which this both between from as its their was were has have not for but they these those when where while more than also such can may would could should about into over under

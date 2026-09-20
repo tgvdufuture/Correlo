@@ -8,13 +8,16 @@ import { sha256Hex } from "@/lib/hash";
 // bascule de connecteur d'embeddings (Ollama ↔ API).
 // `investigation` a été câblé par la Phase 4 du PRD v1.2 (US-09) : un job par
 // suggestion, un rejeu du même job met à jour la ligne d'investigation (job.id).
+// `conversation` ajouté par la migration 009 (Phase 6, amendement v1.3 §13) : un job par
+// **tour**, dont l'id est celui du message de réponse (un rejeu met à jour cette ligne).
 export type JobKind =
   | "ingest"
   | "summary"
   | "discover"
   | "investigation"
   | "synthesize"
-  | "reembed";
+  | "reembed"
+  | "conversation";
 export type JobStatus = "pending" | "running" | "done" | "failed";
 
 export interface JobRow {

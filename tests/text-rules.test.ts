@@ -5,6 +5,7 @@ import {
   isParaphraseOf,
   lexicalContainment,
   looksEnglish,
+  mentionsProtocolReference,
   normalizeText,
   rejectText,
   textTokens,
@@ -19,6 +20,25 @@ describe("barrière qualité partagée (lib/quality/text-rules)", () => {
   it("normalise comme l'évaluateur (accents, ponctuation, casse)", () => {
     expect(normalizeText("L'Étendue, la Grandeur — le Mouvement !")).toBe(
       "l etendue la grandeur le mouvement"
+    );
+  });
+
+  it("détecte les repères de protocole : famille indexée (Phase 6) et famille historique", () => {
+    // mesuré sur le premier tour réel de la Phase 6 : « Le fragment [0] affirme que… » était
+    // le texte **affiché**, puisque `messages.text` est l'union des affirmations
+    expect(mentionsProtocolReference("Le fragment [0] affirme que la vérité résiste.")).toBe(true);
+    expect(mentionsProtocolReference("voir [12] et [3]")).toBe(true);
+    expect(mentionsProtocolReference("le fragment 2 décrit la mesure")).toBe(true);
+    expect(mentionsProtocolReference("le document n°3 le confirme")).toBe(true);
+    // la famille historique reste couverte (elle n'était appliquée qu'aux profils 2A/5A)
+    expect(mentionsProtocolReference("Texte 1 explique la mesure")).toBe(true);
+    expect(mentionsProtocolReference("A soutient que le doute est premier")).toBe(true);
+    // le discours sur le sujet n'est pas touché
+    expect(mentionsProtocolReference("Le doute méthodique écarte les opinions probables.")).toBe(
+      false
+    );
+    expect(mentionsProtocolReference("Les conditions de l'expérience exigent une mesure répétée.")).toBe(
+      false
     );
   });
 

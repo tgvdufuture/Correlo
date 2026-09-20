@@ -15,6 +15,7 @@
     "validate:phase4": "node scripts/validate-phase-4.mjs",
     "validate:phase5b": "node scripts/validate-phase-5b.mjs",
     "check:browser:5b": "node scripts/browser-check-5b.mjs",
+    "check:browser:6": "node scripts/browser-check-6.mjs",
     "check:browser:4": "node scripts/browser-check-investigation.mjs",
     "discover": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/discover.mjs",
     "eval:phase2a": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/evaluate-phase-2a.mjs",

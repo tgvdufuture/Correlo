@@ -325,3 +325,196 @@ Statut : **livrée** · Reprend les AC1–AC5 du §3 tels quels · N'ajoute **au
 - **Pas de promotion sur le canvas** (§5, décision v1.4) : le feed reste le seul lieu des synthèses ; accepter ne pose rien sur le plan.
 - **Pas d'exploration depuis une synthèse** : la conversation de la Phase 6 partira d'une synthèse ou du corpus ; ce feed ne fait que les rendre lisibles et trançables.
 - Le validateur (`npm run validate:phase5b`) est **en lecture seule**, comme 1B/2B/3/4 : il constate ce que l'usage a produit, il ne rejoue pas l'API — trancher depuis `/syntheses` reste un geste humain.
+
+## 13. Phase 6 — conversation (spécifiée le 2026-09-19)
+
+Statut : **à valider** · Amende la §4 (Phase 6, **AC2 et AC5**) et la §8 (métriques) · N'ajoute aucune colonne à une table verrouillée.
+
+### 13.1 Pourquoi
+
+Trois décisions de l'utilisateur (2026-09-19) :
+
+| Question | Décision |
+|---|---|
+| Le verrou de protocole (grilles Q22/Q25 mécaniques) | **Enchaîner et consigner le report** : les grilles humaines restent en dette, nommées dans PROGRESS.md |
+| Où vivent les tours | **`conversations` + `messages`** (migration 009) : tours en lignes, requêtables |
+| Qui décide d'aller sur le web | **l'agent**, quand le corpus ne suffit pas — « peu de citations ou des manques » |
+
+L'agent d'investigation de la Phase 4 **n'est pas le socle** de cette phase (§11.4) : il approfondit une paire et ne discute pas. Mais tout ce qui rend une enquête vérifiable est réutilisé : boucle bornée à un appel LLM par étape, catalogue d'indices tenu par le serveur, rattachement serveur des citations, règle de preuve **partagée** (`lib/quality/evidence.ts`), cache de prompt, job avec lease et retry.
+
+**Deux AC changent, et le changement est écrit ici plutôt que glissé dans le code :**
+
+- **AC2** — le PRD exigeait « l'accès web est **explicite** (action utilisateur visible) ». L'utilisateur veut que **l'agent décide**. L'AC devient : l'agent décide **dans une condition que le serveur évalue** (§13.4), chaque usage du web est une **étape affichée** du tour, un interrupteur le retire, et la découverte comme l'ingestion restent **100 % locales** (G3 v1.2 intact).
+- **AC5** — « ≤ 5 étapes par tour » devient « ≤ 5 étapes **internes**, plus au plus `WEB_MAX_STEPS` étapes web » : une recherche et deux lectures consommeraient sinon tout le budget, et le modèle conclurait sans lire — le défaut mesuré de la Phase 4.
+
+### 13.2 Le tour de conversation
+
+Un tour = **un job** `conversation` (migration 009 reconstruit `jobs` pour autoriser le kind, comme la 003 puis la 008), pas un appel dans la route : la maison n'appelle pas de LLM depuis une route, et un tour qui subit un `503` doit pouvoir être réessayé **sans rejouer la question** de l'utilisateur.
+
+- **Ancrage** : une conversation part d'une **synthèse** (`anchor_kind='synthesis'`) ou du **corpus** (`anchor_kind='corpus'`). L'ancre est un fait de la ligne, pas une instruction du prompt.
+- **Contexte du tour** : l'énoncé de la synthèse et ses preuves vérifiées quand il y a un ancrage, plus le catalogue que l'agent construit lui-même (recherche lexicale, voisinage d'embeddings) — les deux outils de `lib/agent/retrieval.ts`, réutilisés tels quels.
+- **Sortie structurée** : le modèle ne rend **pas** de prose libre. Il rend **une liste d'affirmations**, chacune portant ses **indices de provenance**, et **le serveur assemble la réponse** à partir de ces affirmations. C'est le prix de l'AC1 : « chaque affirmation porte une provenance » n'est vérifiable que si le texte affiché **est** l'union des affirmations.
+- **Réponse sans provenance** : autorisée à exister (l'AC1 la prévoit), jamais présentée comme un fait — stockée avec `provenance: []`, affichée « non sourcée » et comptée.
+
+  **Six refus, tous récupérables** (chacun consomme l'étape, le modèle lit le motif et se reprend ; liste et mesures établies au **premier tour réel du 2026-09-19**, sur une copie jetable de la base ; le cinquième naît avec les outils web le **2026-09-20**, le sixième le même jour du **premier tour web réel**) :
+
+  | Motif | Ce qu'il refuse | Mesure d'origine |
+  |---|---|---|
+  | `reponse_sans_exploration` | aucune exploration (`search`/`expand`) n'a **abouti dans ce tour** | la question « Que disent ces documents sur ce qui rend une observation fiable ? », ancrée sur une synthèse, a été répondue en **1 étape** à partir des 2 preuves de la synthèse — dont le sujet n'était pas la question — et le tour suivant a rendu **la même matière** |
+  | `reponse_hors_catalogue` | un indice jamais montré — fragment du catalogue **ou** résultat web du tour (le schéma Zod ne peut pas l'attraper : l'indice *est* un entier) | contrat d'origine, étendu aux résultats web |
+  | `reponse_web_non_lue` | citer une page **trouvée mais jamais lue** par `read_page` dans ce tour | décision du 2026-09-20 : seule une lecture passe par le durcissement réseau et produit une copie datée, donc seule une lecture est citable |
+  | `reponse_avec_repere_technique` | la **phrase** parle du protocole (« Le fragment [0] affirme que… »). `messages.text` **est** l'union des affirmations : l'indice de catalogue n'a rien à y faire | deux affirmations sur deux, dans les deux tours rendus |
+  | `reponse_web_ignoree` | répondre alors que le web est **exposé** et qu'aucune étape web n'a été **tentée** (motif : AC2′d, §13.4) | tour réel du 2026-09-20 : `corpus_insuffisant`, outils exposés, **0 étape web**, réponse rendue depuis le corpus seul — le prompt v3 l'y invitait même (« un constat négatif précis vaut mieux qu'une généralité ») |
+  | `reponse_sans_aucune_preuve` | aucune affirmation appuyée (une affirmation non sourcée **isolée** reste admise, cf. AC1) | contrat d'origine |
+
+  Ordre : **les fautes de protocole d'abord, le contenu ensuite** (exploration → indice hors catalogue → page non lue → repère technique → **web ignoré** → aucune preuve). Le web ignoré passe **avant** « aucune preuve » : quand le web est exposé, les deux motifs sont vrais ensemble et c'est le premier qui dit quoi faire (les deux ont été mesurés sur le même tour). Conséquence assumée : un tour **ancré** paie désormais au moins un appel de lecture de plus — l'ancre est un contexte, jamais la lecture du tour. La règle d'exploration n'est pas nouvelle : c'est celle de la Phase 4 (`conclusion_sans_exploration`), dont la mesure avait déjà montré que ce modèle conclut dès la première action.
+
+### 13.3 Traçabilité : structurelle, jamais sémantique
+
+Trois familles de provenance, et **le serveur seul** les rattache :
+
+| Famille | Ce que le modèle rend | Ce que le serveur vérifie |
+|---|---|---|
+| Corpus | un indice de catalogue (`[0]`, `[3]`…) | le fragment existe, texte et source identiques (règle `evidence.ts`, **à chaque lecture**) |
+| Web | un indice de résultat (`W0`, `W1`) | la copie du passage est présente et bien formée ; l'URL est affichée **avec sa date de lecture** |
+| Workspace | un indice de fichier + la plage de lignes | le chemin est **dans la racine confinée**, le fichier est lisible, le texte de la plage n'a pas changé |
+
+**Asymétrie assumée — c'est le point de conception à retenir** : une citation de corpus est **revérifiée à chaque lecture** (fragment local et immuable, règle de la Phase 4) ; une citation web **ne peut pas** l'être (la page peut changer ou disparaître, et la relire à chaque affichage serait un appel réseau déclenché par un rendu). Une citation web est donc **datée** (`retrieved_at`) et affichée comme une copie du jour, jamais comme un fait courant : le vérificateur web contrôle l'**intégrité de la copie**, pas la page.
+
+**Ne pas** tenter de juger si une affirmation est *impliquée* par le fragment cité : c'est mesuré aveugle en Phase 4 (§11.3 — recouvrement **0,27** sur une clause qui résume pourtant correctement son fragment). Ce cran reste le juge sémantique noté dans `Ideas`, pas de la plomberie.
+
+### 13.4 Le web : déverrouillé par constat, pas par humeur
+
+**Règle de déverrouillage** (évaluée une fois par tour, côté serveur, après les étapes internes) :
+
+```
+fragments utilisables = fragments du catalogue qui
+    (a) appartiennent à au moins 2 sources distinctes, et
+    (b) ne sont pas de l'appareil (looksStructural — constat 5A)
+
+outils web exposés  ⇔  fragments utilisables < WEB_UNLOCK_MIN_EVIDENCE   (défaut 2)
+```
+
+Sinon les outils **n'existent pas** dans la liste exposée au modèle : c'est la même façon de rendre une contrainte vraie **par construction** que l'AC3 de la Phase 4 (aucun outil réseau n'y existe). Ce détour est nécessaire, et il est adossé à deux mesures : sans `reasoning_effort`, ce modèle rend 6 tokens et `{"skip": true}` (10 thèmes → 10 skips, Phase 5A), et en Phase 4 il a conclu **dès la première étape**. Un web disponible en permanence ferait répondre le modèle **depuis le web** au lieu du corpus — c'est-à-dire remplacerait le produit, dont le corpus est la valeur.
+
+**Deux mesures du 2026-09-20 bornent cette règle, et elles ne disent pas la même chose.** Toutes deux sur une copie jetable (`VACUUM INTO`), modèle `nvidia/nemotron-3-super-120b-a12b`, prompt v4, Exa réel :
+
+1. **Le constat est un critère de *volume*, et il ne sait pas reconnaître « aucune réponse ».** Question « Que disent les documents sur la régulation européenne des batteries lithium et le recyclage des véhicules électriques ? » posée sur le corpus réel (3 883 fragments, 12 œuvres du xixᵉ) : la recherche lexicale rend **4 fragments de 3 sources** qui partagent 2 racines avec la question (`Madame Bovary`, `La chasse au météore`, `Vie de Jésus`), donc `corpus_suffisant`, donc **le web n'est jamais exposé** — 2 étapes, 0 lecture, réponse : « ces documents sont des œuvres littéraires et n'en parlent pas », sourcée sur les 4 fragments. La réponse est *honnête et correcte sur le corpus* ; ce qui manque, c'est que la même question posée au web ramène **le règlement (UE) 2023/1542 lui-même** en 3,8 s (§mesure ci-dessous). Le correctif évident — exiger « au moins deux racines partagées » — a été **mesuré puis écarté** (`tests/measure-unlock.test.ts`, `MEASURE_UNLOCK=1`) : le bruit hors sujet en partage 2 à 3, et une question légitimement couverte (« Que dit Claude Bernard sur l'observation et l'expérience ? ») partage exactement le même profil. Aucun seuil de comptage ne sépare le bruit du pertinent : c'est le mur de la Phase 4 (0,27 de recouvrement, §11.3). **Décision (2026-09-20)** parmi deux options chiffrées : le constat de volume **reste**, mais il n'est plus le seul chemin — le **modèle demande** le web par une action explicite (`ask_web`, après une exploration interne aboutie). L'AC2′e ci-dessous porte le second chemin, et sa mesure.
+2. **Exposer un outil n'est pas le faire employer.** Sur le corpus réel avec les outils exposés (`corpus_insuffisant` obtenu en abaissant `WEB_UNLOCK_MIN_EVIDENCE` à 8 — c'est un réglage de vérification, pas un défaut), le tour a répondu **sans une seule étape web** : 2 étapes, le même constat négatif, sourcé sur les fragments hors sujet. D'où l'**AC2′d** ci-dessous : le constat du serveur doit être *agi*, pas seulement affiché.
+
+**AC2′d — le web exposé et ignoré est un refus (`reponse_web_ignoree`).** Si le serveur a constaté que le corpus ne suffit pas, une réponse qui n'a **tenté aucune** étape web est refusée, et le motif visible le dit. Ce qui est compté est la **tentative**, pas le succès : un `search_web` refusé, une recherche sans résultat ou un `read_page` rejeté par le durcissement répondent au constat — exiger un succès condamnerait un tour que le web ne peut pas aider (et `WEB_MAX_STEPS=0` le ferait échouer à coup sûr). Le prompt (v4) **annonce** la règle, sinon elle serait un piège.
+
+**Mesure du tour web réel complet (base neuve, corpus vide, réglages par défaut) :**
+
+| Ce qui devait marcher | Ce qui s'est passé |
+|---|---|
+| le constat d'insuffisance | `corpus_insuffisant` (0 fragment) → outils exposés, **sans aucun réglage forcé** |
+| la recherche réelle | Exa rend **5 résultats** en 3,8 s, dont le règlement (UE) 2023/1542 (EUR-Lex, FR et EN) et une page de vulgarisation |
+| le durcissement | `read_page` du **PDF** EUR-Lex → **refus `type_refuse`** (l'extracteur ne lit pas un PDF) ; le tour se reprend et lit la page HTML `eli/reg/2023/1542/oj?locale=fr` |
+| la copie datée | 3 affirmations, toutes sourcées sur cette page, **lue le 2026-09-20**, `vérifiée: true` à la relecture |
+| les budgets | 3/5 étapes internes, 3/3 web, 6 appels LLM, 77 s |
+
+Ce tour est aussi la meilleure démonstration de l'**asymétrie des citations** (§13.3) : la copie web est figée et vérifiée, la page ne sera **jamais** relue à l'affichage.
+
+**AC2′e — le second chemin : le modèle demande (`ask_web`).** Après une exploration `search`/`expand` **aboutie**, le modèle peut *demander* le web en disant **ce qui manque** (« le corpus ne traite que la mesure optique, pas le protocole électrique ») — le motif est conservé dans la trace du tour et affiché. La demande est **facturée comme une étape interne** (elle change l'état du tour) et refusée dans trois cas, **sans coût** : `exploration_requise` (rien n'a été lu — la demande serait le raccourci mesuré en 5A et en Phase 4), `web_deja_expose` (le constat a déjà ouvert les outils), `outil_web_indisponible` (`WEB_ACCESS=off` ou aucun connecteur). Les tests couvrent les quatre chemins (`tests/conversation-web.test.ts`, « le second chemin »), et la mutation retire les deux gardes (exploration, déjà exposé) fait tomber **exactement** leurs deux tests.
+
+**Mesure du tour réel (2026-09-20, prompt v6, corpus réel 3 883 fragments, question des batteries, Exa réel) :**
+
+| étape | ce qui s'est passé |
+|---|---|
+| 1. `search` | 4 fragments littéraires — `corpus_suffisant`, donc le constat **ne pouvait pas** ouvrir le web |
+| 2. `ask_web` | le modèle **demande** : `demande_modele`, outils exposés, motif conservé |
+| 3. `search_web` | 5 résultats, dont le **règlement (UE) 2023/1542** (EUR-Lex, FR et EN) |
+| 4. `read_page` | W2 lue (page de synthèse EUR-Lex) |
+| 5. `answer` | 1 affirmation, sourcée sur la copie **lue le 2026-09-20**, `vérifiée: true` à la relecture |
+
+Budgets : 3/5 internes, 2/3 web, 5 appels LLM, 49 s. Le même tour avec la base et la question identiques, **en v5**, rendait 2 étapes, 0 web et un constat négatif (« Les documents fournis ne traitent pas de… ») : la v5 disait « si rien ne permet de répondre et que les outils web ne sont pas exposés, dis-le » — or, **avant toute demande, ils ne le sont jamais**. Le chemin le plus court était donc toujours ouvert, et le modèle l'a pris. La v6 rend cette conduite **dépendante de l'état** (fermé mais ouvrable → demander ; ouvert → chercher dehors ; hors de portée → constater), et c'est la mesure, pas le raisonnement, qui a produit ce changement.
+
+**Deux outils, jamais plus** :
+
+| Outil | Entrée | Coût | Plafond |
+|---|---|---|---|
+| `search_web` | une requête | 1 appel au connecteur de recherche = **1 étape** | 1 par tour |
+| `read_page` | un indice de résultat | 1 requête HTTP + Readability = **1 étape** | `WEB_MAX_STEPS − 1` |
+
+**Durcissement de `read_page`** — non négociable, et pas un excès de prudence : le PRD §7 liste déjà la *prompt injection via documents ingérés* comme risque et §8 laisse le durcissement des URL **en question ouverte**. Ici l'URL est choisie **par le modèle**, donc influençable par un document ingéré :
+
+1. **http/https seulement** — ni identifiants dans l'URL, ni `file:`, `data:` ou `ftp:` ;
+2. résolution DNS **puis** refus des adresses privées, de bouclage, de lien local et de multicast (IPv4 **et** IPv6, IPv4 mappées comprises), refus **réévalué à chaque redirection**, redirections suivies **à la main**, 3 au plus ;
+3. plafonds repris de l'ingestion : 45 s, 10 Mo, types texte seulement ;
+4. le texte extrait est **une donnée, jamais une instruction** — la règle v1.2 (« aucune exécution d'instructions du contenu ») s'applique telle quelle ;
+5. **aucun** `read_page` hors des résultats du `search_web` du tour.
+
+**Connecteur de recherche** : `SEARCH_PROVIDER` (`exa` | `none`, défaut `none`). Sans connecteur ni clé, les outils web **n'existent pas** — aucun fallback, comme partout ailleurs. Le connecteur s'écrit en `fetch` direct dans `lib/agent/`, avec la politique de retry/timeout partagée : le projet n'a **aucun SDK tiers**, un `POST` n'en justifie pas un.
+
+**Réalisé le 2026-09-20** (`lib/agent/web-guard.ts`, `web-page.ts`, `web-search.ts`, `web-tools.ts`). Ce que la mise en œuvre a précisé, et qui fait partie de la règle :
+
+- le corps envoyé à la recherche est **minimal** (`query`, `numResults`, `type`) : on ne demande **pas** le texte des pages. Un texte rendu par le connecteur serait du contenu sans chemin ni date ; c'est `read_page` qui lit, par le durcissement, et c'est cette lecture-là qui devient citable ;
+- les adresses des résultats sont **filtrées à l'exposition** : schéma et identifiants, plus le cas d'un littéral d'adresse privée (`http://127.0.0.1/…`), constatable sans réseau. Un hôte **nommé** qui résoudrait vers une adresse privée ne peut pas être filtré là : c'est la lecture qui le refuse, après résolution ;
+- un refus **ne se paie pas** : `outil_web_indisponible`, `budget_web_epuise`, `recherche_deja_faite`, `page_deja_lue`, `resultat_hors_recherche` sont tracés (`charged: false`) mais ne consomment ni budget interne ni budget web — sinon un modèle insistant ferait dépasser le plafond de l'AC5′ par la seule addition de ses refus ;
+- une exploration est plafonnée à `budget − 1` : la réponse est une étape interne et doit garder sa place. Sans cette réserve, cinq explorations et rien pour conclure — le tour échouait alors qu'il avait de quoi répondre ;
+- l'intégrité d'une citation web est vérifiée **sans réseau**, contre `messages.run` : résultat présent, page lue, URL, date et passage identiques à la lecture enregistrée. Une copie altérée redevient « non sourcée » ;
+- **réserve écrite dans le module** : la fenêtre entre la résolution DNS contrôlée et celle de `fetch` (rebinding) reste ouverte — la fermer demanderait d'épingler l'adresse validée, ce qu'`undici` n'expose pas. Les chemins normaux (localhost, métadonnées cloud, IP privées, redirections) sont fermés et testés ;
+- le vocabulaire des refus vit dans un module **pur** (`web-refusals.ts`) : réexporter les libellés depuis le durcissement faisait entrer `node:dns/promises` dans le bundle client, et `npm run build` a échoué sur `the chunking context (unknown) does not support external modules`.
+
+### 13.5 Le workspace (AC3) : lecture seule, racine confinée
+
+- Racine unique `WORKSPACE_ROOT` (vide ⇒ **outil absent**, pas une erreur à l'exécution) ; l'écran affiche la racine active, il ne la choisit pas (un sélecteur de dossier serait un écran de réglages, hors AC).
+- Un seul outil : `read_file(chemin, de_ligne, à_ligne)`. Confinement : chemin résolu, **symlinks résolus**, refus si le résultat ne commence pas par la racine ; texte seulement ; ≤ 256 Ko par lecture ; **aucune écriture**, aucune énumération de dossier.
+- Citation = `chemin:ligne` + la copie de la plage lue.
+
+### 13.6 Modèles ajoutés (migration `009`)
+
+`conversations`
+
+| Champ | Type | Notes |
+|---|---|---|
+| id | uuid PK | |
+| anchor_kind | TEXT | `synthesis` \| `corpus` — `CHECK` |
+| anchor_ref | TEXT | uuid de la synthèse (NULL si corpus) — intégrité portée par le dépôt, comme `canvas_items` |
+| title | TEXT | premier message, tronqué — sert à lister |
+| chat_model, prompt_version | TEXT NOT NULL | comme `syntheses` |
+| created_at, updated_at | timestamp | |
+
+`messages`
+
+| Champ | Type | Notes |
+|---|---|---|
+| id | uuid PK | |
+| conversation_id | FK `conversations` ON DELETE CASCADE | |
+| role | TEXT | `user` \| `assistant` — `CHECK` |
+| text | TEXT NOT NULL | pour l'assistant : **assemblé depuis les affirmations**, jamais la prose brute du modèle |
+| claims | JSON | `[{ text, provenance: [...] }]` — la copie au moment T (fragment, URL datée, chemin:ligne) |
+| run | JSON | enveloppe du tour : budget, compteurs, outils appelés, déverrouillage web, versions de règles — **même parti pris que `investigations.steps`** |
+| status | TEXT | `pending` \| `done` \| `failed` |
+| created_at | timestamp | |
+
+`jobs` : kind `conversation` (reconstruction de table, procédure 003/008).
+
+**Aucune colonne ajoutée** à `sources`, `fragments`, `suggestions`, `constructions`, `investigations` (ni à `jobs`, sinon la reconstruction). L'AC4 est satisfait **par ces deux tables** : une note liée à une synthèse **est** une conversation ancrée et son tour ; elle n'écrit ni dans `fragments` ni dans `syntheses`.
+
+### 13.7 Réglages ajoutés
+
+`SEARCH_PROVIDER` (`none`), `EXA_API_KEY`, `WEB_ACCESS` (`on` — à `off`, les outils web ne sont jamais exposés), `WEB_MAX_STEPS` (3), `WEB_UNLOCK_MIN_EVIDENCE` (2), `WEB_SEARCH_RESULTS` (5, borne le prompt et le coût), `WORKSPACE_ROOT` (vide), `CONVERSATION_MAX_STEPS` (5).
+
+Statut des réglages web (2026-09-20) : **branchés et testés** — `SEARCH_PROVIDER=exa` sans clé échoue au **boot** (message de configuration), plutôt qu'au milieu d'un tour après que l'utilisateur a attendu.
+
+### 13.8 Acceptance Criteria (Phase 6)
+
+- **AC1** : chaque affirmation de l'assistant porte ses provenances (`fragment_id` + locator, `url` + copie datée, `chemin:ligne`) ; le serveur rattache et vérifie les entités citées (règle `evidence.ts` pour le corpus) **à chaque lecture** ; une affirmation dont **aucune** provenance ne survit est affichée « non sourcée », jamais comme un fait.
+- **AC2′ (amendé)** : l'agent décide d'aller sur le web, sous trois conditions vérifiables — (a) les outils web ne sont **exposés** qu'après le constat serveur d'insuffisance **ou** une demande motivée du modèle après exploration (AC2′e, §13.4), (b) chaque usage produit une **étape visible** (requête et URL affichées), (c) `WEB_ACCESS=off` les retire. Découverte et ingestion restent **100 % locales** (G3). **Réalisé (2026-09-20)** : (a) et (c) par tests unitaires sur les trois cas (corpus suffisant / insuffisant / `off`, plus « le constat exige une exploration **interne** »), et par le **tour réel v6** où le modèle demande lui-même le web (`demande_modele`) ; (b) par la vérification navigateur — URL et « copie lue le <date> » affichées, étapes web visibles.
+- **AC2′e (nouveau, décision du 2026-09-20)** : le web est aussi ouvrable par une **demande du modèle** (`ask_web`) après une exploration interne **aboutie** ; la demande est facturée, motivée dans la trace, et refusée sans coût quand elle est prématurée (`exploration_requise`), inutile (`web_deja_expose`) ou impossible (`outil_web_indisponible`). **Réalisé** : quatre tests dans `tests/conversation-web.test.ts`, mutation des deux gardes (chacune ne tombe que son test), et le tour réel du §13.4.
+- **AC3** : `read_file` est **lecture seule** et **confiné** à `WORKSPACE_ROOT` (symlinks résolus) ; sans racine configurée, l'outil n'existe pas.
+- **AC4** : une note liée à une synthèse est persistée (conversation ancrée + son tour) et **n'écrit rien** dans `fragments` ni dans `syntheses` (test).
+- **AC5′ (amendé)** : ≤ `CONVERSATION_MAX_STEPS` (5) étapes **internes**, plus au plus `WEB_MAX_STEPS` (3) étapes web ; le total est affiché. Un tour qui épuise son budget sans réponse est un **échec tracé**, pas un silence. **Réalisé (2026-09-20)** : les compteurs portent sur les étapes **exécutées** (un refus n'est pas facturé, §13.4) et l'écran affiche les deux budgets séparément (`2/5 internes · 2/3 web`).
+- **AC6** : `read_page` refuse les schémas non http(s), les adresses privées/bouclage/lien local (y compris après redirection) et les réponses hors plafond — chacun testé, **sans réseau réel**. **Réalisé (2026-09-20)** : 24 tests, `fetch` et la résolution DNS injectés ; les formes IPv6 encapsulantes (mappée, 6to4, NAT64, Teredo) sont refusées comme les autres.
+- **AC7** : une citation web est **datée** et n'est **jamais** re-fetchée à l'affichage d'un tour (test : aucune requête sortante sur une lecture de conversation). **Réalisé (2026-09-20)** : `verifyConversationTurn` vérifie la copie contre `messages.run` sans aucun accès réseau, et la lecture d'un tour ne rappelle pas davantage la lecture du tour précédent.
+- **AC8** : une conversation engagée est **mesurable** en base — la métrique §8 (« ≥ 1 conversation par session ») ne l'était pas.
+
+### 13.9 Ce que cet amendement ne fait pas
+
+- Il **n'ajoute aucun outil d'écriture** : ni fichier, ni fragment, ni synthèse, ni canvas. La conversation sera la première phase entièrement **en lecture**.
+- Il ne rend pas le web **nécessaire** : sans `SEARCH_PROVIDER` ni clé, la Phase 6 est complète et hors ligne — c'est le défaut.
+- Il ne juge pas si une affirmation est **vraie** : il vérifie ce qui est **citable**. Le juge sémantique reste la dette d'`Ideas`.
+- Il ne rembourse **pas** la dette des deux grilles humaines (report consigné dans PROGRESS.md).
+- Il ne touche ni au feed de synthèses ni au canvas : la promotion d'une synthèse sur le plan reste la décision v1.4 (§5).

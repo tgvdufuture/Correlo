@@ -53,6 +53,41 @@ const envSchema = z
      * est la valeur des runs manuels, à baisser seulement si le quota le permet.
      */
     AUTO_DISCOVER_INTER_BATCH_DELAY_MS: z.coerce.number().int().nonnegative().default(65_000),
+    /**
+     * Étapes **internes** d'un tour de conversation (Phase 6). Un tour fait au plus cet
+     * nombre d'appels LLM, un par étape ; le service plafonne de toute façon dur à 5
+     * (`CONVERSATION_STEP_BUDGET`, AC5′), donc une valeur plus grande n'a pas d'effet —
+     * elle est lue ici pour que le réglage soit visible là où les autres le sont.
+     */
+    CONVERSATION_MAX_STEPS: z.coerce.number().int().positive().default(5),
+    /**
+     * Accès web d'un tour de conversation (amendement v1.3 §13.4).
+     *
+     * `on` ne suffit **pas** : les outils web sont exposés au modèle seulement si le
+     * serveur **constate** que le catalogue ne porte pas `WEB_UNLOCK_MIN_EVIDENCE`
+     * fragments utilisables issus d'au moins deux sources. `off` les retire quel que soit
+     * le constat (AC2′c).
+     */
+    WEB_ACCESS: z.enum(["on", "off"]).default("on"),
+    /**
+     * Étape web d'un tour : au plus `WEB_MAX_STEPS` (recherche comprise), en **plus** des
+     * `CONVERSATION_MAX_STEPS` étapes internes (AC5′). Le service plafonne dur à 3
+     * (`WEB_STEP_BUDGET`), donc une valeur plus grande n'a pas d'effet — elle est lue ici
+     * pour que le réglage soit visible là où les autres le sont.
+     */
+    WEB_MAX_STEPS: z.coerce.number().int().positive().default(3),
+    /** Fragments utilisables en deçà desquels le web est exposé (défaut 2). */
+    WEB_UNLOCK_MIN_EVIDENCE: z.coerce.number().int().positive().default(2),
+    /**
+     * Connecteur de recherche. `none` (défaut) ⇒ **les outils web n'existent pas**, et la
+     * Phase 6 reste complète et hors ligne. Aucun fallback : la maison n'a jamais de chemin
+     * de repli implicite.
+     */
+    SEARCH_PROVIDER: z.enum(["exa", "none"]).default("none"),
+    /** Clé du connecteur `exa` (requise dès que `SEARCH_PROVIDER=exa`). */
+    EXA_API_KEY: z.string().optional(),
+    /** Résultats rendus par une recherche web (borne le prompt et le coût). */
+    WEB_SEARCH_RESULTS: z.coerce.number().int().positive().max(10).default(5),
     OLLAMA_BASE_URL: z.string().min(1).default("http://localhost:11434"),
     OLLAMA_EMBED_MODEL: z.string().min(1).default("nomic-embed-text"),
     OLLAMA_CHAT_MODEL: z.string().optional(),
@@ -88,6 +123,15 @@ const envSchema = z
         code: z.ZodIssueCode.custom,
         path: ["OLLAMA_CHAT_MODEL"],
         message: "OLLAMA_CHAT_MODEL est requis quand LLM_CHAT_PROVIDER=ollama",
+      });
+    }
+    // Connecteur web déclaré sans clé : échouer au boot plutôt qu'au milieu d'un tour de
+    // conversation, où le refus arriverait après que l'utilisateur a attendu son tour.
+    if (env.SEARCH_PROVIDER === "exa" && !env.EXA_API_KEY) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["EXA_API_KEY"],
+        message: "EXA_API_KEY est requis quand SEARCH_PROVIDER=exa",
       });
     }
     // Clé absente sur le service NVIDIA (qui l'exige) : échouer au boot plutôt qu'au

@@ -1,12 +1,14 @@
 "use client";
 
 import { useState, useSyncExternalStore } from "react";
+import Link from "next/link";
 import {
   AlertTriangle,
   Check,
   ChevronDown,
   FlaskConical,
   Loader2,
+  MessageSquare,
   RefreshCw,
   X,
 } from "lucide-react";
@@ -251,6 +253,15 @@ export function SynthesisFeed() {
                         className={expanded === item.id ? "rotate-180 transition-transform" : "transition-transform"}
                       />
                       {expanded === item.id ? "Masquer" : "Voir"} les preuves ({item.evidence.length})
+                    </Button>
+                    {/* Porte d'entrée de la Phase 6 (AC4) : la conversation part de la
+                        synthèse, et c'est elle qui garde la note liée. Un lien, pas un
+                        bouton : l'adresse est rechargeable et garde son ancre. */}
+                    <Button asChild variant="outline" size="sm">
+                      <Link href={`/conversation?anchor=synthesis&ref=${item.id}`}>
+                        <MessageSquare />
+                        Discuter
+                      </Link>
                     </Button>
                     <Button size="sm" disabled={busy === item.id} onClick={() => void decide(item, "accept")}>
                       {busy === item.id ? <Loader2 className="animate-spin" /> : <Check />}

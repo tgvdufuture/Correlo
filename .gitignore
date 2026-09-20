@@ -24,6 +24,9 @@
 .DS_Store
 *.pem
 
+# identifiants locaux de l'outillage
+/.freebuff/
+
 # debug
 npm-debug.log*
 yarn-debug.log*
