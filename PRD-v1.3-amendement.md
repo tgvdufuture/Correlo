@@ -551,3 +551,78 @@ Statut de `WORKSPACE_ROOT` (2026-09-20) : **branché et mesuré** — vide ⇒ l
 - Il ne juge pas si une affirmation est **vraie** : il vérifie ce qui est **citable**. Le juge sémantique reste la dette d'`Ideas`.
 - Il ne rembourse **pas** la dette des deux grilles humaines (report consigné dans PROGRESS.md).
 - Il ne touche ni au feed de synthèses ni au canvas : la promotion d'une synthèse sur le plan reste la décision v1.4 (§5).
+---
+
+## 14. Amendement v1.6 (2026-09-20) — l'explorateur de tableaux
+
+### 14.1 Pourquoi
+
+Décision utilisateur (2026-09-20), en Q&R en quatre vagues (16 décisions tranchées) : rendre l'app navigable « comme un explorateur de fichiers » (référence Windows/Apple), où l'utilisateur **explore ses tableaux** (les canvases) et peut **discuter avec l'IA en lien avec plusieurs tableaux**. Trois mots d'ordre : *cohabitation* (l'atelier reste un espace à part entière), *coquille + capacités* (la coquille neuve et ce qui la rend vivante), *l'aperçu est un poste de pilotage* (détail, liens, et les actions IA au premier plan).
+
+| Question | Décision |
+|---|---|
+| Ce que l'utilisateur explore | **ses canvases**, et peut discuter en lien avec plusieurs |
+| L'atelier | **cohabite** — l'explorateur est l'accueil, l'atelier reste un espace (le plan) |
+| Périmètre | coquille **et** capacités (épinglés, étiquettes, activité récente) |
+| Multi-canvas | migration `010_canvases.sql` : l'atelier devient le **premier** canvas |
+| Ancrage des conversations | **multi-ancrage** : une conversation peut être liée à plusieurs canvases |
+| Arborescence | canvases → frames (l'arbre s'arrête aux frames ; les objets se voient dans la zone) |
+| Aperçu | l'objet + ses liens + **les actions IA** (« Discuter de ça », « Investiguer », « Synthétiser ») |
+| Zone principale | **vignette du plan** (miniature cliquable) |
+| Écrans existants | ils restent des pages (sources, suggestions, synthèses) |
+| Gestion des canvases | **complète** : créer, renommer, supprimer, colorier/étiqueter, réordonner |
+| Capacités | **épinglés** + **étiquettes/couleurs** + **activité récente** |
+| Accueil | **l'explorateur devient `/`** ; l'atelier vit à `/canvas/<id>` (redirection de `/canvas`) |
+| Contexte des conversations multi-canvas | **les constructions** des canvases ancrés entrent dans le contexte du tour |
+| Suppression d'un canvas non vide | les objets **survivent** (détachés, récupérables — l'atelier a un « hors canvas ») |
+| Vocabulaire UI | **« Tableaux »** |
+
+### 14.2 Ce qui change dans le PRD
+
+- **Navigation (§3.1)** — l'explorateur (`/`) remplace l'atelier comme écran d'ouverture : arbre **Tableaux → Frames**, zone principale en **vignette du plan** du tableau ou de la frame sélectionnée (cliquer la vignette ouvre l'atelier focalisé sur la frame), volet d'**aperçu-poste de pilotage** (détail, liens, actions IA). Les pages `/sources`, `/suggestions`, `/syntheses`, `/conversations` restent ; la nav les garde.
+- **Canvas (§9)** — `canvas_frames`, `canvas_nodes`, `canvas_items` gagnent un parent : table `canvases` (migration `010`, procédure 003/008/009 : reconstruction, aucune colonne sur table verrouillée). L'atelier existant entre comme premier canvas (label « Atelier », `is_default = 1`) ; les frames existantes lui appartiennent. `canvas_nodes.frame_id` devient `frame_id` → canvas **et** frame via la frame (une frame appartient à un canvas ; une construction posée hors frame appartient au canvas). `canvas_items` suit la même règle.
+- **Conversation (§13.6)** — `conversations` ne porte plus l'ancrage dans la ligne : table de liaison `conversation_canvases(conversation_id, canvas_id)` (multi-ancrage). L'ancrage historique `anchor_kind/anchor_ref` reste lisible pour les conversations existantes (règle de lecture : « ancré sur le corpus » reste le défaut). Le **contexte du tour** s'enrichit : les constructions posées sur les canvases ancrés (leurs paires et extraits, plafonnées) entrent dans le catalogue de départ du tour, à côté des preuves de la synthèse ancrée — mêmes règles de rattachement et de vérification que le reste (AC1 de la Phase 6 inchangée).
+- **Accueil** — `/` sert l'explorateur ; `/canvas` redirige vers l'atelier (`/canvas/<id du premier canvas>`). L'écran de création de conversation (deux portes d'entrée de la Phase 6) reste servi depuis l'aperçu (« Discuter de ça ») et de l'explorateur (« Nouvelle conversation », multi-canvas cochables).
+- **Aucune entité sémantique nouvelle** : pas de suggestion, pas de synthèse, pas de verdict dans cette phase. L'explorateur est une **coquille de navigation** sur les entités v1.2–v1.3, avec trois capacités de confort (épinglés, étiquettes, activité récente) — toutes dérivées, aucune n'écrit dans les entités verrouillées.
+
+### 14.3 Modèles ajoutés (migration `010`)
+
+`canvases`
+
+| Champ | Type | Notes |
+|---|---|---|
+| id | uuid PK | |
+| label | TEXT NOT NULL | affiché dans l'arbre et l'onglet de l'atelier |
+| color | TEXT | étiquette couleur (palette fermée côté écran) |
+| is_default | INTEGER | `1` pour l'atelier migré — unique, non supprimable |
+| pinned | INTEGER | épinglé en tête de l'explorateur |
+| position | INTEGER | ordre manuel (réordonnancement glisser dans l'arbre) |
+| created_at, updated_at | timestamp | |
+
+`canvas_frames.canvas_id` (colonne ajoutée, reconstruction) — une frame appartient à un canvas ; l'atelier migré reçoit toutes les frames existantes.
+
+`conversation_canvases(conversation_id, canvas_id)` — table de liaison, PK composée, `ON DELETE CASCADE` des deux côtés ; une conversation peut être liée à plusieurs canvases, un canvas porte plusieurs conversations.
+
+`canvases` porte aussi les trois capacités de confort : `pinned`, `color` (étiquette) — l'« activité récente » est **dérivée** (`updated_at` de canvases + `updated_at` des conversations liées + `created_at` des synthèses récentes), aucune table de plus.
+
+### 14.4 Réglages ajoutés
+
+Aucun. L'explorateur ne lit ni clé, ni provider, ni quota : c'est une coquille de navigation sur des données locales (G3 v1.2 intact — rien de réseau dans cette phase).
+
+### 14.5 Acceptance Criteria (v1.6)
+
+- **AC1** : l'explorateur (`/`) liste les canvases (arbre Tableaux → Frames) ; créer/renommer/supprimer/colorier/épingler/réordonner un canvas est persistant ; supprimer un canvas non vide **détache** ses objets (ils restent accessibles, l'atelier les montre « hors frame ») et **jamais** l'inverse (aucune suppression en cascade d'une Construction).
+- **AC2** : la vignette du plan d'un canvas/frame est rendue depuis les **données** (positions réelles), cliquable, et ouvre l'atelier focalisé sur la frame (centre + zoom).
+- **AC3** : l'aperçu d'un objet (construction, suggestion, synthèse, conversation) porte son détail, ses **liens** (enquêtes, synthèses, conversations, canvases qui le citent) et ses **actions IA** (« Discuter de ça » pré-coche les canvases de l'objet, « Investiguer », « Synthétiser ») — chaque action mène aux écrans existants, elle ne les réinvente pas.
+- **AC4** : une conversation peut être liée à plusieurs canvases (multi-ancrage, persistant) ; les canvases ancrés sont visibles dans l'écran de conversation et dans l'aperçu des canvases ; supprimer un canvas **détache** ses conversations (elles restent, hors tableau).
+- **AC5** : le contexte d'un tour de conversation sur une conversation multi-ancrée contient les constructions des canvases ancrés (paires + extraits, plafonnés) — et chaque affirmation de la réponse qui s'y appuie est **citable et revérifiable** comme le reste (AC1 Phase 6 : rattachement serveur, catalogue, vérification à la lecture).
+- **AC6** : épinglés, étiquettes/couleurs et activité récente sont persistants et visibles dans l'explorateur ; l'activité récente est dérivée (aucune écriture supplémentaire à chaque action).
+- **AC7** : rien ne régresse : l'atelier garde tout son comportement (drag, groupes, arêtes, promotion), les écrans existants restent servis, et **aucune colonne d'une table verrouillée** ne bouge (migration par reconstruction, procédure établie).
+
+### 14.6 Ce que cet amendement ne fait pas
+
+- Il ne **remplace** aucun écran expert : sources, suggestions, synthèses restent des pages ; l'explorateur y mène, il ne les absorbe pas (v1.7 décidera).
+- Il n'ajoute **aucune capacité sémantique** : pas de nouveau verdict, pas de nouveau type d'analyse — la coquille navigue ce qui existe.
+- Il ne touche pas au web ni au workspace de la Phase 6 : l'aperçu les expose comme actions, les règles de la Phase 6 (§13.4, §13.5) restent les seules portes.
+- Il ne fait pas de recherche globale (Spotlight) : la recherche de la v1.6 est celle qui existe (filtres des écrans) ; une barre de commande est une suite, pas cette phase.
+- Il ne change rien au protocole de conversation (budgets, refus, déverrouillage web) : l'ancrage multi-canvas **enrichit le catalogue de départ**, il n'écrit jamais dans le tour lui-même.
