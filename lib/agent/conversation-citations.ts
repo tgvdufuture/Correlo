@@ -1,9 +1,13 @@
 import type { Db } from "@/lib/db/client";
+// imports **relatifs** (pas les alias `@/`) : le validateur `scripts/validate-phase-6.mjs`
+// importe cette règle depuis un script Node sans résolution d'alias — même convention que
+// `lib/quality/evidence.ts`, et pour la même raison : le validateur et le serveur ne
+// peuvent pas diverger sur ce qu'est une citation vérifiable.
 import {
   evidenceProblem,
   loadLiveFragments,
   type EvidenceProblem,
-} from "@/lib/quality/evidence";
+} from "../quality/evidence.ts";
 import {
   webExcerpt,
   type ClaimProvenance,
@@ -14,20 +18,20 @@ import {
   type WebProvenance,
   type WebProblem,
   type WorkspaceRead,
-} from "@/lib/agent/conversation-types";
+} from "./conversation-types.ts";
 import {
   WorkspaceRefusalError,
   workspaceExcerpt,
   type WorkspaceReader,
-} from "@/lib/agent/workspace";
-import type { WorkspaceProblem } from "@/lib/agent/workspace-refusals";
+} from "./workspace.ts";
+import type { WorkspaceProblem } from "./workspace-refusals.ts";
 
 // le vocabulaire des problèmes vit dans des modules **purs** : l'écran doit pouvoir
 // l'afficher sans entraîner ni la base ni `node:fs` dans un bundle client
-export { WEB_PROBLEM_LABEL } from "@/lib/agent/conversation-types";
-export type { WebProblem } from "@/lib/agent/conversation-types";
-export { WORKSPACE_PROBLEM_LABEL } from "@/lib/agent/workspace-refusals";
-export type { WorkspaceProblem } from "@/lib/agent/workspace-refusals";
+export { WEB_PROBLEM_LABEL } from "./conversation-types.ts";
+export type { WebProblem } from "./conversation-types.ts";
+export { WORKSPACE_PROBLEM_LABEL } from "./workspace-refusals.ts";
+export type { WorkspaceProblem } from "./workspace-refusals.ts";
 
 /**
  * Ce qui rend une **affirmation** citable (AC1), vérifié **à la lecture**.

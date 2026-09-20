@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { decodeTextBytes } from "@/lib/ingest/decoding";
+// import **relatif** : `conversation-citations.ts` (donc ce module, via la relecture des
+// citations) est importé par `scripts/validate-phase-6.mjs`, et un script Node ne résout
+// pas les alias `@/` — même convention que `lib/quality/evidence.ts`.
+import { decodeTextBytes } from "../ingest/decoding.ts";
 import type { WorkspaceRefusal } from "@/lib/agent/workspace-refusals";
 
 /**
@@ -66,11 +69,14 @@ export const WORKSPACE_DEFAULT_LINES = 200;
 
 /** Motif de refus, typé — le service en fait une étape tracée, jamais une exception nue. */
 export class WorkspaceRefusalError extends Error {
-  constructor(
-    readonly refusal: WorkspaceRefusal,
-    message: string
-  ) {
+  // pas de **parameter property** (`constructor(readonly refusal…)`) : le validateur
+  // importe ce module en *strip-only* (Node 24), qui refuse cette syntaxe — un champ
+  // déclaré puis affecté dit la même chose et se dépouille sans transformation
+  readonly refusal: WorkspaceRefusal;
+
+  constructor(refusal: WorkspaceRefusal, message: string) {
     super(message);
+    this.refusal = refusal;
     this.name = "WorkspaceRefusalError";
   }
 }

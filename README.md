@@ -178,6 +178,27 @@ ne tient plus (source supprimée ou ré-ingérée) arrive **marquée**, jamais s
 une preuve, et le texte copié au moment T reste affichable (AC4). Accepter n'écrit rien
 ailleurs : les Constructions restent le socle paire v1.2 (AC5).
 
+Phase 6 (conversation) — l'écran de conversation (`/conversations`, avec deux portes
+d'entrée : « Discuter » sur une synthèse, ou une question posée au corpus entier) mène
+des tours d'agent **affirmation par affirmation** : chaque affirmation porte ses
+provenances (fragment du corpus, page web **datée**, fichier `chemin:lignes`) et le
+serveur les revérifie à chaque lecture. Le validateur constate ce que les tours ont
+produit — et rejugé chaque tour avec la règle du jour :
+
+```bash
+npm run dev                        # puis discuter depuis /conversations (web et workspace en réglages)
+npm run validate:phase6            # provenances revérifiées, web gouverné, budgets tenus, sans réseau
+```
+
+Le web est **gouverné par le serveur** : les outils ne sont exposés qu'après le constat
+d'insuffisance du corpus **ou** une demande motivée du modèle (`ask_web`) — et une
+réponse rendue sur un tour à web exposé a tenté le web ou cité un fichier lu. Le
+workspace (`WORKSPACE_ROOT`) est un seul outil, `read_file`, lecture seule, confiné
+(symlinks résolus) ; sans racine, l'outil n'existe pas. Le validateur vérifie les copies
+web **les modules réseau de Node désactivés** — une citation web n'est jamais re-fetchée
+(AC7). Chaque règle du validateur est **falsifiée** : le tour qui devrait la faire
+tomber la fait tomber.
+
 Vérification navigateur (écrans `/syntheses` et panneau d'investigation) : les scripts
 ouvrent les pages dans un Chromium piloté (`playwright-core`, devDependency ; l'exécutable
 est celui déjà présent dans `%LOCALAPPDATA%\ms-playwright` — passer `executablePath` si

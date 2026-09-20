@@ -8,8 +8,8 @@ import {
   type MessageRole,
   type WebResult,
   type WorkspaceRead,
-} from "@/lib/agent/conversation-types";
-import { WORKSPACE_REFUSAL_LABEL } from "@/lib/agent/workspace-refusals";
+} from "./conversation-types.ts";
+import { WORKSPACE_REFUSAL_LABEL } from "./workspace-refusals.ts";
 
 /**
  * Version du prompt de conversation — incluse dans la clé du cache de prompt.

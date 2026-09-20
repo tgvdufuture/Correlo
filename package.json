@@ -14,6 +14,7 @@
     "validate:phase3": "node scripts/validate-phase-3.mjs",
     "validate:phase4": "node scripts/validate-phase-4.mjs",
     "validate:phase5b": "node scripts/validate-phase-5b.mjs",
+    "validate:phase6": "node scripts/validate-phase-6.mjs",
     "check:browser:5b": "node scripts/browser-check-5b.mjs",
     "check:browser:6": "node scripts/browser-check-6.mjs",
     "check:browser:4": "node scripts/browser-check-investigation.mjs",
