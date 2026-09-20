@@ -320,6 +320,10 @@ export {
 // lit la base) ne peuvent pas entrer dans un bundle client — le build l'a attrapé
 export { WEB_REFUSAL_LABEL } from "@/lib/agent/web-refusals";
 export { WEB_PROBLEM_LABEL } from "@/lib/agent/conversation-types";
+// même règle pour le workspace : `lib/agent/workspace.ts` importe `node:fs`, ses libellés
+// vivent dans un module pur (et un seul endroit)
+export { WORKSPACE_REFUSAL_LABEL, WORKSPACE_PROBLEM_LABEL } from "@/lib/agent/workspace-refusals";
+export type { WorkspaceProblem } from "@/lib/agent/workspace-refusals";
 
 /**
  * Une provenance d'affirmation, **vérifiée à cette lecture**. `verified: false` ⇒ elle
@@ -356,7 +360,31 @@ export interface WebProvenanceView {
   problem?: "resultat_absent" | "page_non_lue" | "copie_modifiee" | "date_invalide";
 }
 
-export type ClaimProvenanceView = FragmentProvenanceView | WebProvenanceView;
+/**
+ * Une provenance **workspace** : `chemin:ligne` plus la copie de la plage. Pas de date
+ * affichée comme un fait du jour (contrairement au web) : la plage est **revérifiée à cette
+ * lecture**, et `verified: false` dit laquelle des deux choses a changé — la copie ou le
+ * fichier.
+ */
+export interface FileProvenanceView {
+  kind: "file";
+  index: number;
+  path: string;
+  from_line: number;
+  to_line: number;
+  read_at: string;
+  excerpt: string;
+  verified: boolean;
+  /** Absent quand `verified` est vrai. */
+  problem?:
+    | "lecture_absente"
+    | "copie_modifiee"
+    | "fichier_illisible"
+    | "hors_racine"
+    | "racine_absente";
+}
+
+export type ClaimProvenanceView = FragmentProvenanceView | WebProvenanceView | FileProvenanceView;
 
 export interface ConversationClaimView {
   text: string;
@@ -377,6 +405,20 @@ export interface ConversationWebResultView {
   failure?: string;
 }
 
+/**
+ * Une lecture de fichier du tour, telle qu'elle s'affiche : chemin relatif et plage (AC3),
+ * plus le motif d'un refus. La copie du texte vit dans la provenance de l'affirmation citée.
+ */
+export interface WorkspaceReadView {
+  index: number;
+  path: string;
+  from_line: number;
+  to_line: number;
+  bytes?: number;
+  read_at: string;
+  failure?: string;
+}
+
 export interface ConversationRunView {
   prompt_version: string;
   chat_model: string;
@@ -391,6 +433,9 @@ export interface ConversationRunView {
   web_unlock_min_evidence: number;
   web_unlock_reason?: string;
   web_results: ConversationWebResultView[];
+  /** Racine du workspace **au moment du tour** (`null` s'il n'y en avait pas). */
+  workspace_root: string | null;
+  workspace_reads: WorkspaceReadView[];
   anchor_missing: boolean;
   steps: import("@/lib/agent/conversation-types").ConversationStep[];
   failure?: string;
@@ -423,6 +468,8 @@ export interface ConversationView {
   chat_model: string;
   created_at: string;
   updated_at: string;
+  /** Racine du workspace configurée **aujourd'hui** (`null` : aucune). */
+  workspace_root: string | null;
   /** Une question attend sa réponse (en file ou en cours) — l'écran suit ce champ. */
   awaiting_reply: boolean;
   messages: ConversationMessageView[];
@@ -453,6 +500,8 @@ export const CONVERSATION_STATUS_LABEL: Record<ConversationMessageView["status"]
  */
 export const CONVERSATION_FAILURE_LABEL: Record<string, string> = {
   step_budget_exhausted: "Le budget d'étapes est épuisé avant qu'une réponse soit acceptée.",
+  refus_repete:
+    "Trois refus d'affilée : l'agent a répété une action qui venait d'être refusée, sans répondre.",
   reponse_sans_exploration: "L'agent a voulu répondre sans avoir rien lu du corpus.",
   reponse_sans_aucune_preuve: "Aucune affirmation n'était appuyée par un fragment du corpus.",
   reponse_hors_catalogue: "Une citation portait sur un fragment que l'agent n'avait jamais vu.",
@@ -462,6 +511,26 @@ export const CONVERSATION_FAILURE_LABEL: Record<string, string> = {
   reponse_avec_repere_technique:
     "La réponse parlait du protocole (indice de catalogue) au lieu du sujet.",
   sortie_invalide: "Le modèle n'a pas rendu d'action exploitable.",
+};
+
+/**
+ * Motifs d'échec **d'étape** qui ne viennent pas d'un refus de lecture (ceux-là ont leur
+ * propre table, par outil). Un écran qui afficherait le code brut (`outil_web_indisponible`)
+ * laisserait croire à une panne, alors que c'est une règle du serveur qui s'applique.
+ */
+export const STEP_FAILURE_LABEL: Record<string, string> = {
+  outil_web_indisponible: "outil web non exposé à ce tour",
+  budget_web_epuise: "budget web épuisé",
+  recherche_deja_faite: "une seule recherche web par tour",
+  page_deja_lue: "page déjà lue",
+  resultat_hors_recherche: "résultat absent de la recherche de ce tour",
+  recherche_echec: "recherche web en échec",
+  aucun_resultat: "recherche sans résultat",
+  outil_workspace_indisponible: "aucun workspace configuré",
+  plage_deja_lue: "plage déjà lue dans ce tour",
+  budget_interne_epuise: "budget interne épuisé",
+  indice_hors_catalogue: "indice absent du catalogue",
+  sortie_invalide: "sortie du modèle inexploitable",
 };
 
 /**

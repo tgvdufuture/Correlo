@@ -21,9 +21,10 @@ import {
  * réponse dont **aucune** affirmation n'est appuyée n'est pas une réponse sourcée, et
  * laisser passer reviendrait à accepter l'échange sans corpus.
  *
- * Les outils web sont déclarés **ici comme les autres**, même quand ils ne sont pas
- * exposés : le schéma dit ce qui a une forme valide, le **service** dit ce qui est permis
- * (`outil_web_indisponible`, `budget_web_epuise`…). Mélanger les deux ferait dépendre la
+ * Les outils web et la lecture de fichier sont déclarés **ici comme les autres**, même quand
+ * ils ne sont pas exposés : le schéma dit ce qui a une forme valide, le **service** dit ce qui
+ * est permis (`outil_web_indisponible`, `outil_workspace_indisponible`, `budget_web_epuise`…).
+ * Mélanger les deux ferait dépendre la
  * surface d'outils du modèle de la construction d'un schéma par tour — c'est-à-dire d'un
  * endroit où une divergence entre prompt et garde ne se verrait pas.
  */
@@ -33,11 +34,21 @@ const claimSchema = z.object({
   citations: z.array(z.number().int().min(0)).max(MAX_CITATIONS_PER_CLAIM).optional(),
   /** Indices de **résultats web lus** appuyant cette affirmation (`W0`, `W1`…). */
   web: z.array(z.number().int().min(0)).max(MAX_CITATIONS_PER_CLAIM).optional(),
+  /** Indices de **lectures de fichier réussies** dans ce tour (`F0`, `F1`…). */
+  files: z.array(z.number().int().min(0)).max(MAX_CITATIONS_PER_CLAIM).optional(),
 });
 
 export const CONVERSATION_ACTION_SCHEMA = z
   .object({
-    action: z.enum(["search", "expand", "ask_web", "answer", "search_web", "read_page"]),
+    action: z.enum([
+      "search",
+      "expand",
+      "ask_web",
+      "answer",
+      "search_web",
+      "read_page",
+      "read_file",
+    ]),
     /** Requis par `search` et `search_web`. */
     query: z.string().trim().min(2).max(MAX_WEB_QUERY_CHARS).optional(),
     /**
@@ -50,6 +61,16 @@ export const CONVERSATION_ACTION_SCHEMA = z
     fragment: z.number().int().min(0).optional(),
     /** Requis par `read_page` : indice d'un résultat de la recherche web du tour. */
     result: z.number().int().min(0).optional(),
+    /**
+     * Requis par `read_file` : chemin **dans la racine du workspace** (relatif ou absolu
+     * *dans* la racine — le confinement est appliqué par le serveur après résolution, jamais
+     * par la forme du chemin). Borné : c'est une entrée affichée dans la trace du tour.
+     */
+    path: z.string().trim().min(1).max(400).optional(),
+    /** `read_file` : première ligne lue (1-based). Défaut : 1. */
+    from: z.number().int().min(1).optional(),
+    /** `read_file` : dernière ligne lue (incluse). Défaut : fenêtre de 200 lignes. */
+    to: z.number().int().min(1).optional(),
     /**
      * Requis par `answer`. **Le serveur assemble** `messages.text` à partir de ces
      * affirmations : le modèle ne fournit pas de prose à côté, sinon la provenance
@@ -66,12 +87,14 @@ export const CONVERSATION_ACTION_SCHEMA = z
       if (!val.query) issue(`action ${val.action} : query requis`);
       if (val.fragment !== undefined) issue(`action ${val.action} : fragment interdit`);
       if (val.result !== undefined) issue(`action ${val.action} : result interdit`);
+      if (val.path !== undefined) issue(`action ${val.action} : path interdit`);
       if (val.claims !== undefined) issue(`action ${val.action} : claims interdites`);
     }
     if (val.action === "expand") {
       if (val.fragment === undefined) issue("action expand : fragment requis");
       if (val.query !== undefined) issue("action expand : query interdite");
       if (val.result !== undefined) issue("action expand : result interdit");
+      if (val.path !== undefined) issue("action expand : path interdit");
       if (val.claims !== undefined) issue("action expand : claims interdites");
     }
     if (val.action === "ask_web") {
@@ -79,20 +102,37 @@ export const CONVERSATION_ACTION_SCHEMA = z
       if (val.query !== undefined) issue("action ask_web : query interdite");
       if (val.fragment !== undefined) issue("action ask_web : fragment interdit");
       if (val.result !== undefined) issue("action ask_web : result interdit");
+      if (val.path !== undefined) issue("action ask_web : path interdit");
       if (val.claims !== undefined) issue("action ask_web : claims interdites");
     }
     if (val.action === "read_page") {
       if (val.result === undefined) issue("action read_page : result requis");
       if (val.query !== undefined) issue("action read_page : query interdite");
       if (val.fragment !== undefined) issue("action read_page : fragment interdit");
+      if (val.path !== undefined) issue("action read_page : path interdit");
       if (val.claims !== undefined) issue("action read_page : claims interdites");
+    }
+    if (val.action === "read_file") {
+      if (!val.path) issue("action read_file : path requis (fichier à lire, dans la racine)");
+      if (val.query !== undefined) issue("action read_file : query interdite");
+      if (val.fragment !== undefined) issue("action read_file : fragment interdit");
+      if (val.result !== undefined) issue("action read_file : result interdit");
+      if (val.claims !== undefined) issue("action read_file : claims interdites");
+      if (val.from !== undefined && val.to !== undefined && val.to < val.from) {
+        issue("action read_file : plage incohérente (to < from)");
+      }
     }
     if (val.action === "answer") {
       if (!val.claims || val.claims.length === 0) {
         issue("action answer : claims requises (au moins 1 affirmation)");
       }
-      if (val.query !== undefined || val.fragment !== undefined || val.result !== undefined) {
-        issue("action answer : query, fragment et result interdits");
+      if (
+        val.query !== undefined ||
+        val.fragment !== undefined ||
+        val.result !== undefined ||
+        val.path !== undefined
+      ) {
+        issue("action answer : query, fragment, result et path interdits");
       }
       for (const claim of val.claims ?? []) {
         const citations = claim.citations ?? [];
@@ -102,6 +142,10 @@ export const CONVERSATION_ACTION_SCHEMA = z
         const web = claim.web ?? [];
         if (new Set(web).size !== web.length) {
           issue("action answer : résultats web dupliqués dans une affirmation");
+        }
+        const files = claim.files ?? [];
+        if (new Set(files).size !== files.length) {
+          issue("action answer : lectures de fichier dupliquées dans une affirmation");
         }
       }
     }

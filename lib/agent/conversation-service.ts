@@ -9,6 +9,12 @@ import { toCatalogueEntry } from "@/lib/agent/citations";
 import { looksStructural } from "@/lib/synth/select";
 import { mentionsProtocolReference } from "@/lib/quality/text-rules";
 import { WebRefusalError } from "@/lib/agent/web-guard";
+import {
+  WorkspaceRefusalError,
+  workspaceExcerpt,
+  type WorkspaceReader,
+  type WorkspaceReadResult,
+} from "@/lib/agent/workspace";
 import type { WebSearchResult } from "@/lib/agent/web-search";
 import type { WebTools } from "@/lib/agent/web-tools";
 import type { CatalogueEntry } from "@/lib/agent/types";
@@ -23,6 +29,7 @@ import {
 import {
   CONVERSATION_STEP_BUDGET,
   DEFAULT_HISTORY_MESSAGES,
+  MAX_REFUSED_STEPS,
   MAX_WEB_RESULTS,
   assembleAnswerText,
   stepScope,
@@ -34,6 +41,7 @@ import {
   type ConversationStep,
   type ConversationTurn,
   type WebResult,
+  type WorkspaceRead,
 } from "@/lib/agent/conversation-types";
 import { DEFAULT_AGENT_CATALOGUE_SIZE, DEFAULT_AGENT_PAGE_SIZE } from "@/lib/agent/types";
 import type { ConversationsRepo, MessageRow } from "@/lib/repositories/conversations";
@@ -58,7 +66,10 @@ import type { SourcesRepo } from "@/lib/repositories/sources";
  *     « la même question posée plus tard » (le contexte a changé, et c'est voulu :
  *     l'utilisateur attend une réponse au contexte d'aujourd'hui), mais le **rejeu du
  *     même tour** — celui d'une reprise après un `503`, ou d'un `POST` rejoué ;
- *  3. **le web est exposé par constat, pas par humeur** (§13.4, ci-dessous).
+ *  3. **le web est exposé par constat, pas par humeur** (§13.4, ci-dessous) ;
+ *  4. **le workspace est le seul outil local** (`read_file`, §13.5) : lecture seule, confiné
+ *     à `WORKSPACE_ROOT`, et **il n'existe pas** sans racine configurée. Il ne consomme ni
+ *     budget web ni réseau, mais une étape **interne** — c'est du travail de l'agent.
  *
  * Les citations sont vérifiées **à la lecture**, pas au moment du run : une source
  * supprimée ou ré-ingérée transforme une affirmation sourcée en affirmation non sourcée
@@ -106,6 +117,8 @@ export interface ConversationRunResult {
   /** Le web a-t-il été exposé à ce tour (et pourquoi) ? */
   webUnlocked: boolean;
   webUnlockReason?: string;
+  /** Lectures de fichiers du tour (réussies et refusées). */
+  workspaceReads: number;
   llmCalls: number;
   llmCallsFromCache: number;
   /** Affirmations retenues (0 si le tour n'a pas répondu). */
@@ -113,6 +126,17 @@ export interface ConversationRunResult {
   /** Affirmations sans preuve — comptées, jamais présentées comme un fait. */
   unsourced: number;
   failure?: string;
+}
+
+/**
+ * État **workspace** d'un tour (§13.5). Même parti pris que l'état web : le tableau
+ * `workspace_reads` du document est muté en place, et le lecteur est celui du réglage.
+ */
+interface WorkspaceRuntime {
+  /** `null` quand aucune racine n'est configurée : l'outil n'existe pas. */
+  reader: WorkspaceReader | null;
+  reads: WorkspaceRead[];
+  now: () => Date;
 }
 
 /**
@@ -153,6 +177,11 @@ export class ConversationService {
        * défaut, et un tour sans web est complet (AC5′ : 0 étape web).
        */
       web?: WebTools;
+      /**
+       * Lecteur du workspace (§13.5, AC3). Absent ou désactivé ⇒ `read_file` n'existe pas
+       * dans la liste exposée au modèle, et un appel direct est refusé sans être facturé.
+       */
+      workspace?: WorkspaceReader | null;
       /** Horloge injectable (dates de lecture web) — surchargeable par les tests. */
       now?: () => Date;
     }
@@ -176,6 +205,14 @@ export class ConversationService {
 
     const tools = this.deps.web ?? null;
     const minEvidence = tools?.unlockMinEvidence ?? 2;
+    const wsReader = this.deps.workspace ?? null;
+    const ws: WorkspaceRuntime = {
+      // `enabled: false` (racine vide) et « pas de lecteur » sont le même cas pour le tour :
+      // l'outil n'est pas exposé — et le refus direct reste porté par le lecteur lui-même
+      reader: wsReader?.enabled ? wsReader : null,
+      reads: [],
+      now: this.deps.now ?? (() => new Date()),
+    };
     const web: WebRuntime = {
       tools: tools?.enabled ? tools : null,
       unlocked: false,
@@ -204,6 +241,11 @@ export class ConversationService {
       web_unlock_min_evidence: minEvidence,
       web_unlock_reason: web.reason,
       web_results: web.results,
+      // la racine **du tour** est écrite : un tour relu doit dire d'où venaient ses
+      // fichiers, même si le réglage a changé depuis (c'est le cas où une citation cesse
+      // d'être revérifiable — et il doit être lisible, pas deviné)
+      workspace_root: ws.reader?.root ?? null,
+      workspace_reads: ws.reads,
       catalogue: seed.entries,
       steps: [],
       claims: [],
@@ -241,9 +283,23 @@ export class ConversationService {
     // répondre — le défaut que la Phase 4 avait déjà mesuré (le modèle conclut ou explore
     // jusqu'à épuisement). L'AC5′ reste tenu à la lettre : `internal_steps ≤ step_budget`.
     const explorationBudget = Math.max(1, budget - 1);
-    // la boucle est bornée par la somme des deux budgets : une action interne alors que le
-    // budget interne est épuisé ne peut donc pas faire tourner le tour indéfiniment
-    const maxIterations = budget + web.budget;
+    // La boucle a **deux** bornes, et pas une :
+    //  - les budgets, qui comptent ce qui est **exécuté** (un refus ne coûte rien, AC5′) ;
+    //  - `MAX_REFUSED_STEPS` refus **non facturés** d'affilée, puisqu'un refus ne consomme
+    //    aucun budget et que la boucle doit finir.
+    //
+    // Pourquoi deux, et pas « la somme des budgets + une marge » : chaque itération est un
+    // appel LLM, et les refus n'avancent pas le budget — donc compter les itérations comme les
+    // étapes faisait qu'un refus **prenait la place de la réponse**. Mesuré en écrivant les
+    // tests du workspace : un tour à 3 étapes dont une lecture de fichier refusée par le
+    // confinement finissait `step_budget_exhausted` sans jamais répondre, alors que le budget
+    // interne n'était pas épuisé et qu'il restait de quoi répondre. Les deux bornes sont donc
+    // séparées : trois refus n'enlèvent **jamais** une étape facturée au tour.
+    const maxIterations = budget + web.budget + MAX_REFUSED_STEPS + 1;
+    let refusals = 0;
+    // raison d'un arrêt qui n'est ni « budget épuisé » ni un dernier refus de réponse :
+    // le tour doit dire ce qui l'a arrêté
+    let failureReason: string | undefined;
 
     for (let stepIndex = 1; stepIndex <= maxIterations && status === "pending"; stepIndex++) {
       const internalUsed = charged(doc.steps, "internal");
@@ -253,6 +309,12 @@ export class ConversationService {
       // le budget web ne borne plus rien — ce que le test « trois lectures » a attrapé)
       web.used = webUsed;
       if (internalUsed >= budget && webUsed >= web.budget) break;
+      if (refusals >= MAX_REFUSED_STEPS) {
+        // trois refus d'affilée : le modèle n'écoute pas le motif qu'on vient de lui rendre,
+        // et un tour qui n'avance plus doit se terminer (tracé), pas boucler
+        failureReason = "refus_repete";
+        break;
+      }
 
       const messages = buildConversationPrompt(
         {
@@ -274,6 +336,11 @@ export class ConversationService {
             used: webUsed,
             minEvidence,
             results: web.results,
+          },
+          workspace: {
+            enabled: ws.reader !== null,
+            root: ws.reader?.root ?? null,
+            reads: ws.reads,
           },
         },
         { maxFragmentChars: opts.maxFragmentChars }
@@ -330,11 +397,13 @@ export class ConversationService {
         known,
         priorSteps: doc.steps,
         web,
+        workspace: ws,
         internalUsed,
         internalBudget: budget,
         explorationBudget,
       });
       doc.steps.push(outcome.step);
+      if (outcome.step.charged === false) refusals += 1;
       if (outcome.step.action === "answer") {
         if (outcome.claims) {
           doc.claims = outcome.claims;
@@ -365,9 +434,16 @@ export class ConversationService {
       // budget épuisé sans réponse recevable : c'est un échec au sens du protocole, et la
       // trace des actions reste consultable (on ne rend jamais un silence)
       status = "failed";
-      doc.failure = lastRefusal ?? "step_budget_exhausted";
-      persist(status);
+      doc.failure = lastRefusal ?? failureReason ?? "step_budget_exhausted";
     }
+    // **L'état terminal est écrit ici, une fois, quel que soit le chemin de sortie** — budget
+    // épuisé, trois refus, ou sortie invalide. La version qui ne persistait que dans le cas
+    // `pending` laissait la ligne `messages` en `pending` **à vie** quand la boucle sortait par
+    // la branche « sortie invalide » (statut déjà `failed` en entrant ici) : `awaiting_reply`
+    // restait vrai, l'écran sondait sans fin et le 409 verrouillait la conversation — un tour
+    // perdu, sans trace. Défaut réel, trouvé par un tour réel du 2026-09-20 où le modèle a
+    // rendu une sortie que le schéma refuse.
+    persist(status);
 
     return {
       messageId: opts.messageId,
@@ -377,6 +453,7 @@ export class ConversationService {
       webSteps: doc.web_steps,
       webUnlocked: doc.web_unlocked,
       webUnlockReason: doc.web_unlock_reason,
+      workspaceReads: doc.workspace_reads.filter((r) => !r.failure).length,
       llmCalls: doc.llm_calls,
       llmCallsFromCache: doc.steps_from_cache,
       claims: doc.claims.length,
@@ -581,6 +658,15 @@ export function usableEvidence(catalogue: CatalogueEntry[]): number {
  *     Le constat porte sur les **tentatives**, pas sur les succès : une étape web qui a
  *     échoué compte comme une réponse au constat (sinon une recherche sans résultat — ou un
  *     `WEB_MAX_STEPS=0` — condamnerait le tour à échouer) ;
+ *  5bis. **et le workspace répond au constat** (§13.5). Un tour dont la réponse s'appuie sur
+ *     une lecture de fichier du tour n'a pas « ignoré » le constat : il est allé lire un
+ *     document que l'utilisateur avait **désigné**. Mesuré sur le premier tour workspace réel
+ *     (2026-09-20) : question sur `notes/protocole.md` d'un dossier pourtant configuré, le
+ *     serveur a jugé le corpus insuffisant (1 fragment sur « calibration »), exposé le web,
+ *     et refusé **deux fois** une réponse pourtant sourcée sur le fichier lu — le tour est
+ *     mort à 0 affirmation alors qu'il avait la réponse sous les yeux. Le constat parle du
+ *     **corpus** ; un fichier du workspace n'est pas une absence de source, c'est une source
+ *     que l'utilisateur a nommée ;
  *  6. `reponse_sans_aucune_preuve` — une ou plusieurs affirmations non sourcées sont
  *     admises (l'AC1 les prévoit et l'écran les nomme), mais une réponse dont **aucune**
  *     affirmation n'est appuyée n'est pas une réponse sourcée. Elle passe **après** la
@@ -595,6 +681,15 @@ export function usableEvidence(catalogue: CatalogueEntry[]): number {
  * a rendu **la même matière** — catalogue inchangé, 2 fragments. L'ancre est un **contexte**,
  * pas une lecture : la règle coûte un appel LLM par tour ancré, et c'est le prix de « l'agent
  * lit le corpus avant de répondre ».
+ *
+ * **Et une lecture de fichier **citée** vaut exploration** (`readBeforeAnswer`) : la règle 1
+ * demande qu'une lecture ait eu lieu, pas qu'elle porte sur le corpus. Mesuré sur le premier
+ * tour workspace réel : le modèle a ouvert `notes/protocole.md` **avant** de chercher dans le
+ * corpus — le geste juste pour une question qui nomme un fichier — et la réponse a été refusée
+ * pour « reponse_sans_exploration », alors qu'il venait de lire. Le critère est donc « la
+ * réponse s'appuie sur un document lu pendant ce tour », et la lecture du fichier compte
+ * comme celle du corpus. Ce qui **ne** compte pas : avoir lu sans citer — un fichier ouvert
+ * puis ignoré dans la réponse ne dispense de rien.
  *
  * Ce qui **n'est pas** repris de la Phase 4 : `judgeConclusion`. Sa barrière juge un
  * énoncé unique de 40–120 mots contre une paire de documents (juxtaposition, reprise de la
@@ -612,6 +707,7 @@ interface ActionContext {
   known: Set<string>;
   priorSteps: ConversationStep[];
   web: WebRuntime;
+  workspace: WorkspaceRuntime;
   internalUsed: number;
   internalBudget: number;
   /** Plafond des explorations (`budget − 1`) : la réponse garde sa place. */
@@ -701,6 +797,10 @@ async function applyAction(
     return applyWebAction(action, ctx);
   }
 
+  if (action.action === "read_file") {
+    return applyFileAction(action, ctx);
+  }
+
   if (action.action === "ask_web") {
     const step: ConversationStep = {
       index: stepIndex,
@@ -773,20 +873,33 @@ async function applyAction(
   //
   // Aucune exemption d'ancrage : l'ancre fournit un **contexte** (ce que la synthèse affirme,
   // et ses preuves, citables), jamais la lecture du tour — mesure dans l'encadré ci-dessus.
+  const raw = action.claims ?? [];
+  // Une lecture de fichier **citée** vaut exploration (voir l'encadré) : le critère est
+  // « la réponse s'appuie sur un document lu pendant ce tour », et un fichier du workspace
+  // en est un. Un fichier lu mais non cité ne dispense de rien — sinon n'importe quelle
+  // lecture décorative blanchirait une réponse rendue à partir de rien.
+  const readBeforeAnswer = raw.some((c) =>
+    (c.files ?? []).some((i) => ctx.workspace.reads.some((r) => r.index === i && !r.failure))
+  );
   const explored = priorSteps.some(
     (s) => (s.action === "search" || s.action === "expand") && !s.failure
   );
-  if (!explored) {
+  if (!explored && !readBeforeAnswer) {
     step.refused = "reponse_sans_exploration";
     return { step };
   }
 
-  const raw = action.claims ?? [];
   const unknown = [
     ...raw.flatMap((c) => c.citations ?? []).filter((i) => !catalogue.some((e) => e.index === i)),
     ...raw
       .flatMap((c) => c.web ?? [])
       .filter((i) => !ctx.web.results.some((r) => r.index === i)),
+    // un fichier **refusé** est traité comme un fichier inexistant : la lecture a échoué,
+    // donc il n'y a rien à citer — et le dire « hors catalogue » est exact, l'indice ne
+    // désigne aucune lecture citable
+    ...raw
+      .flatMap((c) => c.files ?? [])
+      .filter((i) => !ctx.workspace.reads.some((r) => r.index === i && !r.failure)),
   ];
   if (unknown.length > 0) {
     step.refused = "reponse_hors_catalogue";
@@ -816,8 +929,13 @@ async function applyAction(
   // durcissement, ou une recherche sans résultat, a répondu au constat — exiger un succès
   // ferait échouer un tour que le web ne peut pas aider (et `WEB_MAX_STEPS=0` le ferait
   // échouer à coup sûr).
+  // …et le **workspace répond au constat** : un tour dont la réponse s'appuie sur un fichier
+  // lu n'a pas ignoré le web, il a lu une source que l'utilisateur avait désignée (§13.5).
+  // Défaut mesuré sur le premier tour workspace réel : réponse sourcée sur le fichier
+  // demandé, refusée `reponse_web_ignoree` — le tour est mort à 0 affirmation, avec la
+  // réponse sous les yeux. Le constat parle du **corpus**, pas de l'absence de sources.
   const webUntouched = !priorSteps.some((s) => s.scope === "web");
-  if (ctx.web.unlocked && ctx.web.budget > 0 && webUntouched) {
+  if (ctx.web.unlocked && ctx.web.budget > 0 && webUntouched && !readBeforeAnswer) {
     step.refused = "reponse_web_ignoree";
     return { step };
   }
@@ -851,6 +969,21 @@ async function applyAction(
         };
         return provenance;
       }),
+      ...(c.files ?? []).map((i) => {
+        const read = ctx.workspace.reads.find((r) => r.index === i) as WorkspaceRead;
+        const provenance: ClaimProvenance = {
+          kind: "file",
+          index: read.index,
+          path: read.path,
+          from_line: read.from_line,
+          to_line: read.to_line,
+          read_at: read.read_at,
+          // la copie conservée est celle du **serveur**, jamais un extrait recopié par le
+          // modèle : c'est ce qui rend la relecture possible
+          excerpt: workspaceExcerpt(read.text ?? ""),
+        };
+        return provenance;
+      }),
     ],
   }));
 
@@ -864,7 +997,109 @@ async function applyAction(
   step.web_observation = claims.flatMap((c) =>
     c.provenance.filter((p) => p.kind === "url").map((p) => p.index)
   );
+  step.workspace_observation = claims.flatMap((c) =>
+    c.provenance.filter((p) => p.kind === "file").map((p) => p.index)
+  );
   return { step, claims };
+}
+
+/**
+ * `read_file` (§13.5, AC3) — le seul outil **local** de l'agent. Quatre refus, et une seule
+ * règle de facturation :
+ *
+ *  - `outil_workspace_indisponible` — aucune racine configurée (`WORKSPACE_ROOT` vide) :
+ *    l'outil n'existe pas dans la liste exposée, et un appel direct n'aboutit à rien. Ce
+ *    n'est pas une faute du modèle, donc ce n'est pas facturé ;
+ *  - `budget_interne_epuise` — même réserve que `search`/`expand` : la réponse garde sa place
+ *    dans le budget interne (`budget − 1`) ;
+ *  - `plage_deja_lue` — la **même plage du même fichier**, déjà lue dans ce tour. Un modèle
+ *    qui relit ce qu'il vient de lire n'apprend rien et consomme un appel LLM ;
+ *  - les refus du confinement (`chemin_hors_racine`, `chemin_introuvable`, `fichier_binaire`,
+ *    `plage_trop_longue`…) — rendus par le **lecteur**, pas par le service : une seule règle
+ *    de confinement, celle de `lib/agent/workspace.ts`, et le motif remonte tel quel.
+ *
+ * **Ce qui est facturé : exactement ce qui a été lu.** Une lecture réussie est une étape
+ * interne (`scope: "internal"`) : c'est du travail de l'agent, et un outil gratuit
+ * s'appellerait en boucle. Un **refus**, lui, n'est jamais facturé : rien n'a été lu, rien
+ * n'est sorti de la machine — même règle que les refus de réponse, jamais celle du web (où
+ * une tentative *part* sur le réseau, et où c'est l'acte, pas le résultat, qui est compté).
+ * Comme pour le web, les refus restent bornés par le nombre d'itérations du tour.
+ *
+ * Une lecture **refusée est enregistrée** (avec son motif) : la trace doit dire ce qui a été
+ * tenté. Seule une lecture réussie est citable — le confinement est donc visible dans le tour
+ * même, et pas seulement dans le journal du serveur.
+ */
+async function applyFileAction(
+  action: ConversationActionOutput,
+  ctx: ActionContext
+): Promise<{ step: ConversationStep }> {
+  const ws = ctx.workspace;
+  const step: ConversationStep = {
+    index: ctx.stepIndex,
+    action: "read_file",
+    scope: "internal",
+    input: {
+      path: (action.path ?? "").trim(),
+      ...(action.from !== undefined ? { from: action.from } : {}),
+      ...(action.to !== undefined ? { to: action.to } : {}),
+    },
+    added: [],
+    observation: [],
+    workspace_added: [],
+  };
+  const notPaid = (failure: string): { step: ConversationStep } => ({
+    step: { ...step, failure, charged: false },
+  });
+
+  if (!ws.reader) return notPaid("outil_workspace_indisponible");
+  if (ctx.internalUsed >= ctx.explorationBudget) return notPaid("budget_interne_epuise");
+
+  const at = ws.now().toISOString();
+  const index = ws.reads.length;
+  let result: WorkspaceReadResult;
+  try {
+    result = ws.reader.read({
+      path: step.input.path ?? "",
+      from: action.from,
+      to: action.to,
+    });
+  } catch (e) {
+    const failure = e instanceof WorkspaceRefusalError ? e.refusal : "lecture_echec";
+    // la tentative est enregistrée (donc affichée), l'étape n'est pas facturée
+    ws.reads.push({
+      index,
+      path: step.input.path ?? "",
+      from_line: action.from ?? 1,
+      to_line: action.to ?? action.from ?? 1,
+      read_at: at,
+      failure,
+    });
+    return { step: { ...step, failure, charged: false, workspace_added: [index] } };
+  }
+
+  // redondance évaluée sur la **vérité résolue** (chemin réel + plage effective) : comparer
+  // les chemins demandés obligerait à deviner les normalisations du modèle
+  const already = ws.reads.find(
+    (r) =>
+      !r.failure &&
+      r.path === result.path &&
+      r.from_line === result.from_line &&
+      r.to_line === result.to_line
+  );
+  if (already) return notPaid("plage_deja_lue");
+
+  ws.reads.push({
+    index,
+    path: result.path,
+    from_line: result.from_line,
+    to_line: result.to_line,
+    text: result.text,
+    bytes: result.bytes,
+    read_at: at,
+  });
+  step.workspace_added = [index];
+  step.workspace_observation = [index];
+  return { step };
 }
 
 /**

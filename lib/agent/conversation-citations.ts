@@ -9,15 +9,25 @@ import {
   type ClaimProvenance,
   type ConversationClaim,
   type ConversationTurn,
+  type FileProvenance,
   type FragmentProvenance,
   type WebProvenance,
   type WebProblem,
+  type WorkspaceRead,
 } from "@/lib/agent/conversation-types";
+import {
+  WorkspaceRefusalError,
+  workspaceExcerpt,
+  type WorkspaceReader,
+} from "@/lib/agent/workspace";
+import type { WorkspaceProblem } from "@/lib/agent/workspace-refusals";
 
-// le vocabulaire des problèmes vit dans `conversation-types` (module pur) : l'écran doit
-// pouvoir l'afficher sans entraîner la base dans un bundle client
+// le vocabulaire des problèmes vit dans des modules **purs** : l'écran doit pouvoir
+// l'afficher sans entraîner ni la base ni `node:fs` dans un bundle client
 export { WEB_PROBLEM_LABEL } from "@/lib/agent/conversation-types";
 export type { WebProblem } from "@/lib/agent/conversation-types";
+export { WORKSPACE_PROBLEM_LABEL } from "@/lib/agent/workspace-refusals";
+export type { WorkspaceProblem } from "@/lib/agent/workspace-refusals";
 
 /**
  * Ce qui rend une **affirmation** citable (AC1), vérifié **à la lecture**.
@@ -38,7 +48,16 @@ export type { WebProblem } from "@/lib/agent/conversation-types";
  * URL, date et passage identiques à la lecture enregistrée). Aucun accès réseau n'est
  * fait — le vérificateur travaille sur `messages.run`, et nulle part ailleurs.
  *
- * Ce que cette vérification **ne fait pas**, dans les deux familles : juger si
+ * **Workspace.** Troisième famille, et la règle est celle du corpus, pas celle du web : la
+ * plage lue est **relue maintenant** (`Chemin:ligne`, AC3), et la citation ne tient que si la
+ * plage est identique. Le fichier est local, le relire ne coûte rien et ne déclenche aucun
+ * appel — il n'y a donc **aucune raison** de se contenter d'une date. Un fichier modifié
+ * depuis fait passer l'affirmation en « non sourcée » : elle n'a pas vieilli, elle **cesse
+ * d'être appuyée**. La relecture passe par le **même** confinement que le tour (`createWorkspace`
+ * puis `read`) : un lien symbolique détourné, une racine déplacée ou un chemin devenu
+ * illisible se voient ici comme ils se seraient vus pendant le tour.
+ *
+ * Ce que cette vérification **ne fait pas**, dans les trois familles : juger si
  * l'affirmation est *impliquée* par l'extrait. C'est mesuré aveugle en Phase 4 (§11.3 :
  * 0,27 de recouvrement sur une clause qui résume pourtant correctement son fragment). On
  * vérifie ce qui est citable.
@@ -47,7 +66,8 @@ export type { WebProblem } from "@/lib/agent/conversation-types";
 /** Une provenance après vérification : `verified === false` ⇒ jamais présentée comme preuve. */
 export type VerifiedProvenance =
   | (FragmentProvenance & { verified: boolean; problem?: EvidenceProblem })
-  | (WebProvenance & { verified: boolean; problem?: WebProblem });
+  | (WebProvenance & { verified: boolean; problem?: WebProblem })
+  | (FileProvenance & { verified: boolean; problem?: WorkspaceProblem });
 
 export interface VerifiedClaim {
   text: string;
@@ -68,15 +88,30 @@ export interface TurnVerdict {
 }
 
 /**
+ * Ce qui est injecté à la relecture. Le lecteur du workspace est **passé**, jamais lu depuis
+ * la configuration globale : une variable d'environnement qui change ne doit pas changer le
+ * verdict d'un test, et une route qui n'aurait pas de racine doit le dire explicitement
+ * (`workspace: null` ⇒ une citation de fichier est `racine_absente`, donc non vérifiée).
+ */
+export interface VerifyConversationOptions {
+  workspace?: WorkspaceReader | null;
+}
+
+/**
  * Recalcule le verdict de chaque affirmation contre le **tour enregistré** et la base
  * **maintenant**. Aucune entrée : un document sans provenance rend un verdict vide.
  */
-export function verifyConversationTurn(db: Db, turn: ConversationTurn): TurnVerdict {
+export function verifyConversationTurn(
+  db: Db,
+  turn: ConversationTurn,
+  opts?: VerifyConversationOptions
+): TurnVerdict {
   const ids = turn.claims.flatMap((c) =>
     c.provenance.filter((p): p is FragmentProvenance => p.kind === "fragment").map((p) => p.fragment_id)
   );
   const live = loadLiveFragments(db, ids);
   const web = turn.web_results ?? [];
+  const workspace = opts?.workspace ?? null;
   let unverified = 0;
   let unsourced = 0;
 
@@ -89,6 +124,11 @@ export function verifyConversationTurn(db: Db, turn: ConversationTurn): TurnVerd
           ? { ...entry, verified: false, problem }
           : { ...entry, verified: true };
       }
+      if (entry.kind === "file") {
+        const problem = fileProblem(workspace, turn, entry);
+        if (problem) unverified += 1;
+        return problem ? { ...entry, verified: false, problem } : { ...entry, verified: true };
+      }
       const problem = webProblem(web, entry);
       if (problem) unverified += 1;
       return problem ? { ...entry, verified: false, problem } : { ...entry, verified: true };
@@ -99,6 +139,59 @@ export function verifyConversationTurn(db: Db, turn: ConversationTurn): TurnVerd
   });
 
   return { claims, unverified, unsourced };
+}
+
+/**
+ * L'intégrité d'une **citation de fichier** (AC3), vérifiée **par relecture**, sans réseau et
+ * sans base : la provenance doit correspondre à une lecture de ce tour, et la plage doit
+ * **toujours dire la même chose**.
+ *
+ * Cinq contrôles, dans cet ordre — le premier qui échoue est le motif affiché :
+ *  1. une lecture de ce tour porte cet indice, et elle a réussi (`lecture_absente`) ;
+ *  2. la racine est configurée **maintenant** (`racine_absente`) : sans elle, il n'y a rien
+ *     à revérifier — et c'est le cas où il serait tentant de croire la copie sur parole ;
+ *  3. le chemin et la date enregistrés correspondent à la lecture du tour, et la copie
+ *     conservée est bien celle de la plage lue (`copie_modifiee`) ;
+ *  4. la plage est **relue aujourd'hui par le même confinement** : un chemin sorti de la
+ *     racine est `hors_racine`, tout autre refus du lecteur est `fichier_illisible` ;
+ *  5. la plage relue donne le **même texte** (`copie_modifiee`) — c'est le seul contrôle qui
+ *     dépend du disque, et c'est lui qui rend une citation de fichier honnête : elle décrit
+ *     le document tel qu'il est, pas tel qu'il était.
+ */
+export function fileProblem(
+  workspace: WorkspaceReader | null,
+  turn: ConversationTurn,
+  prov: FileProvenance
+): WorkspaceProblem | null {
+  const reads: WorkspaceRead[] = turn.workspace_reads ?? [];
+  const stored = reads.find((r) => r.index === prov.index && !r.failure && r.text !== undefined);
+  if (!stored) return "lecture_absente";
+  if (!workspace || !workspace.enabled) return "racine_absente";
+  if (
+    stored.path !== prov.path ||
+    stored.from_line !== prov.from_line ||
+    stored.to_line !== prov.to_line ||
+    stored.read_at !== prov.read_at ||
+    workspaceExcerpt(stored.text ?? "") !== prov.excerpt
+  ) {
+    return "copie_modifiee";
+  }
+  let fresh: { text: string };
+  try {
+    fresh = workspace.read({
+      path: prov.path,
+      from: prov.from_line,
+      to: prov.to_line,
+    });
+  } catch (e) {
+    if (e instanceof WorkspaceRefusalError) {
+      return e.refusal === "chemin_hors_racine" || e.refusal === "racine_invalide"
+        ? "hors_racine"
+        : "fichier_illisible";
+    }
+    return "fichier_illisible";
+  }
+  return workspaceExcerpt(fresh.text) === prov.excerpt ? null : "copie_modifiee";
 }
 
 /**

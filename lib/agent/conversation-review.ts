@@ -11,7 +11,9 @@ import {
   type ConversationStatus,
   type ConversationStep,
   type MessageRole,
+  type WorkspaceRead,
 } from "@/lib/agent/conversation-types";
+import type { WorkspaceReader } from "@/lib/agent/workspace";
 import { verifyConversationTurn, type VerifiedClaim } from "@/lib/agent/conversation-citations";
 
 /**
@@ -34,6 +36,11 @@ import { verifyConversationTurn, type VerifiedClaim } from "@/lib/agent/conversa
  *    cite (locator, titre de source, texte). Ce qui est renvoyé pour le tour, c'est ce
  *    qui **s'affiche** — les étapes de l'agent, les compteurs, l'éventuel échec. Le
  *    catalogue reste dans la ligne (`messages.run`), où il sert à la vérification.
+ * 3. **Le lecteur du workspace est injecté**, jamais lu depuis la configuration globale
+ *    (`createConversationReviewService(db, { workspace })`) : c'est le seul moyen pour
+ *    qu'une citation de fichier soit revérifiée **par la même règle** que pendant le tour,
+ *    et pour qu'un test ne dépende pas du `.env.local` de la machine. Sans lecteur, une
+ *    citation de fichier est déclarée `racine_absente` — jamais crue sur parole.
  */
 
 export interface ConversationAnchorView {
@@ -49,11 +56,26 @@ export interface ConversationAnchorView {
 }
 
 /**
+ * Une **lecture de fichier** du tour, telle qu'elle s'affiche : le chemin relatif et la plage
+ * (AC3), plus le motif d'un éventuel refus. La copie vit dans la provenance de l'affirmation
+ * qui la cite — même parti pris que pour une page web, et pour la même raison : deux
+ * copies du même texte feraient deux vérités à l'écran.
+ */
+export interface WorkspaceReadView {
+  index: number;
+  path: string;
+  from_line: number;
+  to_line: number;
+  bytes?: number;
+  read_at: string;
+  failure?: string;
+}
+
+/**
  * Un résultat de recherche web tel qu'il s'affiche : l'URL et sa **date de lecture** sont
  * visibles (AC2′b), et le texte lu n'est pas renvoyé ici — il est déjà dans la copie de
  * l'affirmation qui le cite, et le dupliquer ferait deux vérités à l'écran.
- */
-export interface ConversationWebResultView {
+ */export interface ConversationWebResultView {
   index: number;
   url: string;
   title: string | null;
@@ -84,6 +106,13 @@ export interface ConversationRunView {
   web_unlock_reason?: string;
   /** Résultats de la recherche du tour (URL, date de lecture, refus). */
   web_results: ConversationWebResultView[];
+  /**
+   * Racine du workspace **au moment du tour** (`null` s'il n'y en avait pas). Affichée avec
+   * les lectures : une citation de fichier ne veut rien dire sans savoir d'où elle vient.
+   */
+  workspace_root: string | null;
+  /** Lectures de fichiers du tour, refus compris. */
+  workspace_reads: WorkspaceReadView[];
   /** La synthèse ancrée n'existe plus. */
   anchor_missing: boolean;
   steps: ConversationStep[];
@@ -113,6 +142,12 @@ export interface ConversationView {
   chat_model: string;
   created_at: string;
   updated_at: string;
+  /**
+   * Racine du workspace **configurée aujourd'hui** (le réglage, pas le tour) : l'écran
+   * l'affiche pour que l'utilisateur sache ce que l'agent a le droit de lire — et il ne la
+   * choisit pas (un sélecteur de dossier serait un écran de réglages, hors AC3).
+   */
+  workspace_root: string | null;
   /**
    * Une question attend sa réponse (en file **ou** en cours). C'est ce que l'écran suit pour
    * se rafraîchir et pour désactiver le champ : un tour en file n'a encore aucune ligne
@@ -144,9 +179,13 @@ export interface ConversationReviewService {
   read(id: string): ConversationView | null;
 }
 
-export function createConversationReviewService(db: Db): ConversationReviewService {
+export function createConversationReviewService(
+  db: Db,
+  opts?: { workspace?: WorkspaceReader | null }
+): ConversationReviewService {
   const conversations = createConversationsRepo(db);
   const syntheses = createSynthesesRepo(db);
+  const workspace = opts?.workspace ?? null;
 
   const anchorLabel = (kind: ConversationAnchorKind, ref: string | null): string | null => {
     if (kind !== "synthesis" || !ref) return null;
@@ -181,6 +220,16 @@ export function createConversationReviewService(db: Db): ConversationReviewServi
         ...(r.retrieved_at ? { retrieved_at: r.retrieved_at } : {}),
         ...(r.failure ? { failure: r.failure } : {}),
       })),
+      workspace_root: turn.workspace_root ?? null,
+      workspace_reads: (turn.workspace_reads ?? []).map((r: WorkspaceRead) => ({
+        index: r.index,
+        path: r.path,
+        from_line: r.from_line,
+        to_line: r.to_line,
+        ...(r.bytes !== undefined ? { bytes: r.bytes } : {}),
+        read_at: r.read_at,
+        ...(r.failure ? { failure: r.failure } : {}),
+      })),
       anchor_missing: turn.anchor_missing === true,
       steps: turn.steps,
       ...(turn.failure ? { failure: turn.failure } : {}),
@@ -200,7 +249,9 @@ export function createConversationReviewService(db: Db): ConversationReviewServi
       return { ...base, claims: [], unsourced: 0, unverified: 0 };
     }
     const turn = parseConversationTurn(row.run);
-    const verdict = verifyConversationTurn(db, turn);
+    // la relecture passe le **même** lecteur que le tour : un chemin sorti de la racine, un
+    // fichier modifié ou une racine retirée se voient ici, au lieu d'être crus sur parole
+    const verdict = verifyConversationTurn(db, turn, { workspace });
     return {
       ...base,
       claims: verdict.claims,
@@ -273,6 +324,7 @@ export function createConversationReviewService(db: Db): ConversationReviewServi
         chat_model: conversation.chat_model,
         created_at: conversation.created_at,
         updated_at: conversation.updated_at,
+        workspace_root: workspace?.enabled ? workspace.root : null,
         awaiting_reply: turnInFlight(rows.at(-1)),
         messages,
       };

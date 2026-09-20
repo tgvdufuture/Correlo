@@ -28,6 +28,7 @@ import {
 import { createInvestigationsRepo } from "@/lib/repositories/investigations";
 import { createWebTools } from "@/lib/agent/web-tools";
 import { createConversationsRepo } from "@/lib/repositories/conversations";
+import { createWorkspace } from "@/lib/agent/workspace";
 import { createThemesRepo } from "@/lib/repositories/themes";
 import { createSynthesesRepo } from "@/lib/repositories/syntheses";
 import { createPromptCache } from "@/lib/repositories/llm-cache";
@@ -753,6 +754,10 @@ export function createWorker(): Worker {
   // Conversation (Phase 6) : même cache de prompt que les autres kinds — le rejeu d'un
   // tour (reprise après un 503, `POST` rejoué) ne rappelle pas le modèle, donc la réponse
   // enregistrée reste celle du premier passage.
+  // Workspace (Phase 6, §13.5, AC3) : un lecteur **confiné**, construit une fois depuis le
+  // réglage. `WORKSPACE_ROOT` vide ⇒ `enabled: false`, donc l'outil `read_file` n'est jamais
+  // annoncé au modèle — même construction que le web sans connecteur.
+  const workspace = createWorkspace(config.WORKSPACE_ROOT);
   const conversation = new ConversationService({
     db,
     conversations: createConversationsRepo(db),
@@ -764,6 +769,7 @@ export function createWorker(): Worker {
     chatSignature,
     promptCache,
     web: webTools,
+    workspace,
   });
   // Re-vectorisation : le worker porte le même `embedder` que l'ingestion, donc la
   // bascule se fait dans l'espace exact que les prochains dépôts utiliseront.

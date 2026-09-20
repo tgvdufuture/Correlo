@@ -21,7 +21,13 @@
  *  E. le **tour web** : une conversation porteuse d'une citation web (écrite directement
  *     dans la copie de base, cf. `seedWebTurn`) doit afficher l'URL, la **date de lecture**
  *     et la liste des résultats — sans quoi l'AC2′b (« chaque usage du web est une étape
- *     visible ») serait tenu côté serveur et invisible côté écran.
+ *     visible ») serait tenu côté serveur et invisible côté écran ;
+ *  F. le **tour workspace** : une conversation porteuse d'une citation de fichier
+ *     (`seedWorkspaceTurn`) doit afficher la **racine active**, le `chemin:lignes` et la
+ *     lecture dans les étapes. Le script **écrit lui-même** la racine qu'il cite
+ *     (`data/eval/ws-check`), donc la revérification à l'affichage passe — et si le serveur
+ *     n'a pas été lancé avec le même `WORKSPACE_ROOT`, le check le dit au lieu de laisser
+ *     croire à un défaut d'écran.
  *
  * Ce que le script ne fait **pas** : juger la réponse. Le serveur a déjà vérifié ce qui est
  * citable ; ici on regarde ce qui est *affiché*.
@@ -29,7 +35,8 @@
  * Prérequis : un serveur lancé sur une **copie jetable** de la base (jamais la base réelle —
  * l'étape C écrit vraiment un tour et paie un appel LLM par étape, et l'étape E y écrit une
  * conversation de vérification).
- *   DATABASE_PATH=./data/eval/phase6-http2.db npx next dev -p 3232
+ *   DATABASE_PATH=./data/eval/phase6-http2.db WORKSPACE_ROOT=./data/eval/ws-check \
+ *     npx next dev -p 3232
  */
 import { chromium } from "playwright-core";
 import fs from "node:fs";
@@ -91,6 +98,10 @@ const askButton = () => page.getByRole("button", { name: /Demander|Réponse en c
 
 const DB_PATH = process.env.DATABASE_PATH ?? "";
 const WEB_CONVERSATION_ID = "conv-web-check";
+const WS_CONVERSATION_ID = "conv-ws-check";
+/** Racine créée **par ce script** : le serveur doit la recevoir en `WORKSPACE_ROOT`. */
+const WS_ROOT = "data/eval/ws-check";
+const WS_FILE = "notes/protocole.md";
 
 /**
  * Écrit un tour **web** dans la copie de base, sans appeler le modèle.
@@ -198,6 +209,120 @@ function seedWebTurn() {
       ).run(
         `${WEB_CONVERSATION_ID}-a`,
         WEB_CONVERSATION_ID,
+        run.claims[0].text,
+        JSON.stringify(run.claims),
+        JSON.stringify(run),
+        at
+      );
+    });
+    write();
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Écrit la racine citée par la graine workspace, et **rend la plage avec sa copie** : la
+ * vérification à l'affichage relit le fichier par le confinement, donc la graine doit citer
+ * ce qui existe réellement — un texte inventé donnerait un « copie modifiée » qui ne dirait
+ * rien de l'écran.
+ */
+function seedWorkspaceFixture() {
+  fs.mkdirSync(`${WS_ROOT}/notes`, { recursive: true });
+  fs.writeFileSync(
+    `${WS_ROOT}/${WS_FILE}`,
+    [
+      "# Protocole de calibration — atelier 4",
+      "1. Laisser la sonde reposer vingt minutes à température ambiante.",
+      "2. Étalonner sur deux points seulement : 4,0 et 7,0.",
+      "",
+    ].join("\n")
+  );
+  const lines = fs.readFileSync(`${WS_ROOT}/${WS_FILE}`, "utf8").split(/\r\n|\n/);
+  const text = lines.slice(0, 3).join("\n");
+  return { text, excerpt: clean(text), from: 1, to: 3 };
+}
+
+/** Une conversation qui cite un fichier du workspace, pour regarder ce que l'écran en dit. */
+function seedWorkspaceTurn(seed) {
+  const at = "2026-09-20T11:00:00.000Z";
+  const run = {
+    prompt_version: "conversation-v8",
+    chat_model: "graine-de-verification",
+    step_budget: 5,
+    web_budget: 3,
+    llm_calls: 2,
+    steps_from_cache: 0,
+    history_messages: 0,
+    internal_steps: 2,
+    web_steps: 0,
+    web_unlocked: false,
+    web_unlock_min_evidence: 2,
+    web_unlock_reason: "constat_en_attente",
+    web_results: [],
+    workspace_root: WS_ROOT,
+    workspace_reads: [
+      {
+        index: 0,
+        path: WS_FILE,
+        from_line: seed.from,
+        to_line: seed.to,
+        text: seed.text,
+        bytes: Buffer.byteLength(seed.text, "utf8"),
+        read_at: at,
+      },
+    ],
+    catalogue: [],
+    steps: [
+      {
+        index: 1,
+        action: "read_file",
+        scope: "internal",
+        input: { path: WS_FILE, from: seed.from, to: seed.to },
+        added: [],
+        observation: [],
+        workspace_added: [0],
+        workspace_observation: [0],
+      },
+      { index: 2, action: "answer", scope: "internal", input: {}, added: [], observation: [], workspace_observation: [0] },
+    ],
+    claims: [
+      {
+        text: "Le protocole de l'atelier 4 impose un repos de vingt minutes et un étalonnage sur deux points.",
+        provenance: [
+          {
+            kind: "file",
+            index: 0,
+            path: WS_FILE,
+            from_line: seed.from,
+            to_line: seed.to,
+            read_at: at,
+            excerpt: seed.excerpt,
+          },
+        ],
+      },
+    ],
+    unsourced: 0,
+  };
+
+  const db = new Database(DB_PATH);
+  try {
+    const write = db.transaction(() => {
+      db.prepare("DELETE FROM conversations WHERE id = ?").run(WS_CONVERSATION_ID);
+      db.prepare(
+        `INSERT INTO conversations (id, anchor_kind, anchor_ref, title, chat_model, prompt_version, created_at, updated_at)
+         VALUES (?, 'corpus', NULL, ?, ?, ?, ?, ?)`
+      ).run(WS_CONVERSATION_ID, "Question de vérification workspace", "graine", "conversation-v8", at, at);
+      db.prepare(
+        `INSERT INTO messages (id, conversation_id, role, text, claims, run, status, created_at)
+         VALUES (?, ?, 'user', ?, '[]', NULL, 'done', ?)`
+      ).run(`${WS_CONVERSATION_ID}-u`, WS_CONVERSATION_ID, "Que dit notes/protocole.md ?", at);
+      db.prepare(
+        `INSERT INTO messages (id, conversation_id, role, text, claims, run, status, created_at)
+         VALUES (?, ?, 'assistant', ?, ?, ?, 'done', ?)`
+      ).run(
+        `${WS_CONVERSATION_ID}-a`,
+        WS_CONVERSATION_ID,
         run.claims[0].text,
         JSON.stringify(run.claims),
         JSON.stringify(run),
@@ -363,6 +488,46 @@ try {
       "tour web : la copie n'est pas signalée comme ne tenant plus (vérifiée à la lecture)",
       !/ne tiennent plus/.test(web),
       ""
+    );
+  }
+
+  /* ============ F — un tour workspace : racine, chemin:lignes, étape de lecture ============ */
+  if (!DB_PATH || !fs.existsSync(DB_PATH) || !disposable) {
+    check(
+      "tour workspace : copie de base jetable disponible pour la graine",
+      false,
+      `DATABASE_PATH=${DB_PATH || "(non défini)"} — attendu sous data/eval/`
+    );
+  } else {
+    seedWorkspaceTurn(seedWorkspaceFixture());
+    await page.goto(`${BASE}/conversation/${WS_CONVERSATION_ID}`, { waitUntil: "load" });
+    const loaded = await pollUntil(async () => /atelier 4 impose/.test(await bodyText()), 15_000);
+    const wsSummary = page.locator("summary", { hasText: "Tour de l'agent" }).first();
+    if ((await wsSummary.count()) > 0) await wsSummary.click({ force: true, timeout: SHORT });
+    await sleep(300);
+    const ws = await bodyText();
+    await page.screenshot({ path: `${SHOT_DIR}/6-conversation-workspace.png` });
+
+    check("tour workspace : la citation est affichée", loaded, ws.slice(0, 160));
+    check(
+      "tour workspace : la racine active est affichée (AC3 — l'écran la dit, ne la choisit pas)",
+      /Lecture locale autorisée/.test(ws) && /ws-check/.test(ws),
+      (ws.match(/Lecture locale autorisée[^.]{0,80}/) ?? [""])[0]
+    );
+    check(
+      "tour workspace : la citation porte le chemin et la plage",
+      /notes\/protocole\.md/.test(ws) && /lignes 1-3/.test(ws),
+      (ws.match(/notes\/protocole\.md[^·]{0,40}/) ?? [""])[0]
+    );
+    check(
+      "tour workspace : la lecture de fichier est une étape visible",
+      /lecture d'un fichier du workspace/.test(ws) && /F0/.test(ws),
+      ""
+    );
+    check(
+      "tour workspace : la plage est revérifiée à l'affichage (le fichier n'a pas bougé)",
+      !/ne tiennent plus/.test(ws) && !/fichier absent/.test(ws),
+      (ws.match(/ne tiennent plus[^.]{0,60}/) ?? [""])[0]
     );
   }
 } catch (e) {

@@ -20,8 +20,10 @@
  * Trois familles de provenance, et **le serveur seul** les rattache (§13.3) : le corpus
  * (revérifié à chaque lecture, fragment local et immuable), le web (**copie datée** : une
  * page peut changer, et la relire à chaque affichage serait un appel réseau déclenché par
- * un rendu), le workspace (arrive avec `read_file`). L'asymétrie est le point de
- * conception, pas un oubli.
+ * un rendu), le workspace (`chemin:ligne`, **revérifié à chaque lecture** comme le corpus :
+ * le fichier est local, le relire ne coûte rien et ne sort de nulle part). L'asymétrie est le
+ * point de conception, pas un oubli — une copie web vieillit, un fichier modifié **cesse
+ * d'appuyer** l'affirmation.
  *
  * L'enveloppe du tour vit dans `messages.run` (JSON) : le schéma d'une table v1.2 n'a
  * aucune colonne pour les métadonnées de run, et `messages` n'a pas à les multiplier.
@@ -35,6 +37,25 @@ export const CONVERSATION_STEP_BUDGET = 5;
 
 /** Plafond dur d'étapes **web** par tour, en plus des étapes internes (AC5′). */
 export const WEB_STEP_BUDGET = 3;
+
+/**
+ * Combien de **refus non facturés** la boucle tolère en plus de ses budgets (AC5′).
+ *
+ * **Pourquoi ce n'est pas `budget + budget web`.** Les deux budgets bornent ce qui est
+ * *exécuté*, et un refus ne coûte rien — c'est la règle (§13.4). Mais chaque itération est un
+ * appel LLM, donc la boucle a besoin d'une borne à elle. La prendre égale à la somme des
+ * budgets fait qu'un refus **prend la place de la réponse** : mesuré en écrivant les tests du
+ * workspace, où une lecture refusée par le confinement a consommé la dernière itération d'un
+ * tour à 3 étapes — le tour échouait (`step_budget_exhausted`) alors que le budget interne
+ * n'était pas épuisé et qu'il restait de quoi répondre. C'était déjà vrai pour les refus web ;
+ * la lecture de fichier l'a rendu fréquent. Les deux bornes sont donc **séparées** : ce
+ * compteur n'enlève jamais une étape facturée au tour.
+ *
+ * Trois, parce que trois refus d'affilée disent que le modèle n'écoute pas le motif qu'on
+ * vient de lui rendre — et que le tour doit alors se terminer par un échec **tracé**
+ * (`refus_repete`), pas boucler.
+ */
+export const MAX_REFUSED_STEPS = 3;
 
 /** Nombre d'affirmations admises dans une réponse. Borne le document persisté. */
 export const MAX_CLAIMS = 8;
@@ -78,6 +99,12 @@ export type MessageRole = "user" | "assistant";
  * d'une sortie inexploitable (schéma refusé après le retry de correction), écrite pour
  * qu'un échec reste **lisible** — même convention qu'en Phase 4.
  *
+ * `read_file` est le seul outil **local** du tour (§13.5, AC3) : il n'est ni dans le budget
+ * web ni dans le réseau, mais il consomme une étape **interne** — c'est du travail de
+ * l'agent, et un outil gratuit serait un outil qu'on appelle en boucle. Il n'existe que si
+ * une racine est configurée (`WORKSPACE_ROOT`) : sans racine, l'action est refusée
+ * (`outil_workspace_indisponible`) et n'est même pas annoncée dans le prompt.
+ *
  * Les outils web (`search_web`, `read_page`) sont déclarés par le schéma **comme les
  * autres** : le schéma valide la *forme*, c'est le **service** qui refuse une action qui
  * n'a pas été exposée (constat d'insuffisance, `WEB_ACCESS=off`, budget web épuisé). La
@@ -98,6 +125,7 @@ export type ConversationAction =
   | "answer"
   | "search_web"
   | "read_page"
+  | "read_file"
   | "invalid";
 
 /** Budget auquel une étape est imputée : c'est ce que l'AC5′ compte séparément. */
@@ -122,7 +150,8 @@ export type AnswerRejection =
   | "reponse_sans_exploration";
 
 export const ANSWER_REJECTION_LABEL: Record<AnswerRejection, string> = {
-  reponse_hors_catalogue: "citation d'un fragment ou d'une page qui n'a pas été montré",
+  reponse_hors_catalogue:
+    "citation d'un fragment, d'une page ou d'un fichier qui n'a pas été montré pendant ce tour",
   reponse_web_non_lue: "citation d'une page qui n'a pas été lue pendant ce tour",
   reponse_avec_repere_technique:
     "le texte parle du protocole (indice de catalogue, repère) au lieu du sujet",
@@ -166,11 +195,25 @@ export interface WebProvenance {
 }
 
 /**
- * Provenance d'une affirmation. La famille `fichier` (workspace, `chemin:ligne`) arrivera
- * avec `read_file` : l'écrire avant son outil donnerait un type que rien ne peut produire
- * ni vérifier.
+ * Provenance **workspace** : `chemin:ligne` plus la copie de la plage lue. Aucune date :
+ * contrairement à une copie web, celle-ci **est revérifiée à chaque affichage** — le
+ * fichier est local, le relire ne coûte rien. `path` est **relatif à la racine** (le
+ * chemin absolu n'est ni cité ni affiché : la racine est un réglage de la machine, pas une
+ * information de la réponse), et `index` est l'indice de lecture (`F0`).
  */
-export type ClaimProvenance = FragmentProvenance | WebProvenance;
+export interface FileProvenance {
+  kind: "file";
+  index: number;
+  path: string;
+  from_line: number;
+  to_line: number;
+  /** Date de la lecture, affichée ; la validité, elle, se juge en relisant la plage. */
+  read_at: string;
+  excerpt: string;
+}
+
+/** Provenance d'une affirmation : trois familles, une seule forme de rattachement. */
+export type ClaimProvenance = FragmentProvenance | WebProvenance | FileProvenance;
 
 /** Une affirmation : son texte, et les preuves qui l'appuient (0 preuve = non sourcée). */
 export interface ConversationClaim {
@@ -198,6 +241,25 @@ export interface WebResult {
   failure?: string;
 }
 
+/**
+ * Une **lecture de fichier** du tour (`read_file`). `index` est l'indice vu par le modèle
+ * (`F0`, `F1`) : il ne voit jamais un identifiant technique, et il cite un indice — le
+ * serveur rattache le chemin. Une lecture **refusée** est conservée elle aussi (avec son
+ * motif) : la trace du tour doit dire ce qui a été tenté, pas seulement ce qui a réussi.
+ * Seule une lecture réussie (`text`) est **citable**.
+ */
+export interface WorkspaceRead {
+  index: number;
+  path: string;
+  from_line: number;
+  to_line: number;
+  /** Copie de la plage lue (plafonnée), absente quand la lecture a été refusée. */
+  text?: string;
+  bytes?: number;
+  read_at: string;
+  failure?: string;
+}
+
 /** Une étape = une action de l'agent, et ce qu'elle a produit. */
 export interface ConversationStep {
   /**
@@ -208,7 +270,17 @@ export interface ConversationStep {
   action: ConversationAction;
   /** `internal` ou `web` — ce que l'AC5′ compte séparément. */
   scope?: ConversationStepScope;
-  input: { query?: string; fragment?: number; result?: number; reason?: string };
+  input: {
+    query?: string;
+    fragment?: number;
+    result?: number;
+    reason?: string;
+    /** `read_file` : chemin demandé (tel quel, dans la trace du tour). */
+    path?: string;
+    /** `read_file` : plage demandée. */
+    from?: number;
+    to?: number;
+  };
   /** Indices de catalogue **ajoutés** par cette étape (search / expand). */
   added: number[];
   /** Indices que l'étape donne à lire (ses preuves) — vides si elle n'a rien ajouté. */
@@ -217,6 +289,10 @@ export interface ConversationStep {
   web_added?: number[];
   /** Indices de pages **lues** par l'étape (`read_page`). */
   web_observation?: number[];
+  /** Indice de lecture de fichier produit par l'étape (`read_file`), réussi ou refusé. */
+  workspace_added?: number[];
+  /** Indices de lectures **citables** issues de cette étape (lecture réussie). */
+  workspace_observation?: number[];
   /** `answer` refusée : le motif, et le tour continue dans le budget restant. */
   refused?: AnswerRejection;
   /** Trace d'une sortie inexploitable, d'un outil non exposé ou d'un refus réseau. */
@@ -263,6 +339,14 @@ export interface ConversationTurn {
   web_unlock_reason?: string;
   /** Résultats de la recherche web du tour, et les pages lues (copies datées). */
   web_results: WebResult[];
+  /**
+   * Racine du workspace **au moment du tour** (`null` quand il n'y en avait pas) : un tour
+   * relu doit dire d'où venaient ses fichiers, même si le réglage a changé depuis — c'est
+   * exactement le cas où une citation cesse d'être revérifiable, et il doit être lisible.
+   */
+  workspace_root?: string | null;
+  /** Lectures de fichiers du tour (copies des plages lues, refus compris). */
+  workspace_reads: WorkspaceRead[];
   catalogue: CatalogueEntry[];
   steps: ConversationStep[];
   /**
@@ -286,6 +370,7 @@ export const CONVERSATION_ACTION_LABEL: Record<ConversationAction, string> = {
   answer: "réponse",
   search_web: "recherche web",
   read_page: "lecture d'une page web",
+  read_file: "lecture d'un fichier du workspace",
   invalid: "sortie inexploitable",
 };
 
@@ -336,6 +421,8 @@ export function emptyConversationTurn(): ConversationTurn {
     web_unlocked: false,
     web_unlock_min_evidence: 0,
     web_results: [],
+    workspace_root: null,
+    workspace_reads: [],
     catalogue: [],
     steps: [],
     claims: [],
@@ -359,6 +446,7 @@ export function parseConversationTurn(raw: string | null): ConversationTurn {
       steps: Array.isArray(parsed.steps) ? parsed.steps : [],
       claims: Array.isArray(parsed.claims) ? parsed.claims : [],
       web_results: Array.isArray(parsed.web_results) ? parsed.web_results : [],
+      workspace_reads: Array.isArray(parsed.workspace_reads) ? parsed.workspace_reads : [],
     };
   } catch {
     return empty;

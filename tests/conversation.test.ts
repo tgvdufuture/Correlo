@@ -17,6 +17,7 @@ import { createSourcesRepo } from "@/lib/repositories/sources";
 import { ConversationService } from "@/lib/agent/conversation-service";
 import {
   CONVERSATION_STEP_BUDGET,
+  MAX_REFUSED_STEPS,
   emptyConversationTurn,
   parseConversationTurn,
   type ConversationTurn,
@@ -30,6 +31,7 @@ import { IngestService } from "@/lib/ingest/ingest-service";
 import { SummaryService } from "@/lib/ingest/summary-service";
 import { Worker } from "@/lib/jobs/worker";
 import type { ChatMessage, LlmProvider } from "@/lib/llm/types";
+import { LlmOutputError } from "@/lib/llm/errors";
 
 /**
  * Phase 6 — conversation (amendement v1.3 §13).
@@ -47,6 +49,16 @@ import type { ChatMessage, LlmProvider } from "@/lib/llm/types";
  */
 
 const V = (x: number, y: number): number[] => [x, y, 0, 0, 0, 0, 0, 0];
+
+/** LLM qui rend une sortie que le schéma refuse, après le retry de correction du provider. */
+class UnreadableLlm implements LlmProvider {
+  async embed(): Promise<number[]> {
+    throw new Error("pas d'embedding dans la conversation");
+  }
+  async chat<T extends z.ZodType>(): Promise<z.infer<T>> {
+    throw new LlmOutputError("Sortie LLM invalide après retry de correction — action inconnue");
+  }
+}
 
 /** LLM scripté : rend les actions dans l'ordre, puis répète la dernière. */
 class ScriptedLlm implements LlmProvider {
@@ -604,7 +616,18 @@ describe("service : tour de conversation", () => {
     expect(text).not.toContain("[");
   });
 
-  it("plafond dur : 99 étapes demandées, 5 exécutées", async () => {
+  /**
+   * Deux bornes, et elles sont **séparées** : le budget compte ce qui est **exécuté**, les
+   * refus non facturés ont la leur (`MAX_REFUSED_STEPS`). Ici le modèle ne fait que répéter une
+   * recherche : quatre passent (l'exploration est plafonnée à `budget − 1`, la réponse garde sa
+   * place), les suivantes sont refusées — et au troisième refus d'affilée, le tour s'arrête, au
+   * lieu de boucler sur des refus qui ne coûtent rien.
+   *
+   * La version précédente affirmait `steps === budget`, ce qui couplait les deux bornes : un
+   * refus consommait alors la place d'une **étape facturée**, et un tour à court de budget
+   * pouvait échouer sans avoir jamais eu la place de répondre (défaut mesuré sur le workspace).
+   */
+  it("plafond dur : 99 étapes demandées, quatre exécutées et trois refus, puis arrêt", async () => {
     const { db, fA, fB } = setup();
     const synthId = seedSynthesis(db, [fA, fB]);
     const { conversations } = startTurn(db, "Question sans fin", { anchor: synthId });
@@ -616,11 +639,49 @@ describe("service : tour de conversation", () => {
       maxSteps: 99,
     });
 
-    expect(result.steps).toBe(CONVERSATION_STEP_BUDGET);
-    expect(llm.calls).toBe(CONVERSATION_STEP_BUDGET);
+    expect(result.steps).toBe(CONVERSATION_STEP_BUDGET - 1 + MAX_REFUSED_STEPS);
+    expect(llm.calls).toBe(result.steps); // une itération = un appel LLM, refus compris
+    // les étapes **facturées** ne dépassent jamais le budget (AC5′)
+    expect(result.internalSteps).toBe(CONVERSATION_STEP_BUDGET - 1);
+    expect(result.internalSteps).toBeLessThanOrEqual(CONVERSATION_STEP_BUDGET);
     expect(result.status).toBe("failed");
-    expect(result.failure).toBe("step_budget_exhausted");
+    expect(result.failure).toBe("refus_repete");
     expect(readTurn(conversations, "msg-assistant-1").step_budget).toBe(CONVERSATION_STEP_BUDGET);
+    // le dernier refus dit au modèle quoi faire, et il est tracé comme non facturé
+    const steps = readTurn(conversations, "msg-assistant-1").steps;
+    expect(steps.at(-1)?.failure).toBe("budget_interne_epuise");
+    expect(steps.at(-1)?.charged).toBe(false);
+  });
+
+  /**
+   * Défaut réel, trouvé par un tour réel du 2026-09-20 : la branche « sortie invalide » sortait
+   * de la boucle avec un statut déjà `failed`, donc le bloc qui ne traitait que `pending` ne
+   * passait pas — la ligne `messages` restait `pending` **pour toujours**, `awaiting_reply` vrai,
+   * l'écran qui sonde sans fin et le 409 qui verrouille la conversation. Le tour était perdu
+   * **sans trace** : 0 affirmation, un job `done`.
+   */
+  it("une sortie invalide est un échec tracé, et ne laisse pas la réponse en `pending`", async () => {
+    const { db, fA, fB } = setup();
+    const synthId = seedSynthesis(db, [fA, fB]);
+    const { conversations } = startTurn(db, "Question illisible", { anchor: synthId });
+    const result = await makeService(db, new UnreadableLlm()).run("conv-1", {
+      messageId: "msg-assistant-1",
+      questionMessageId: "msg-user-1",
+      question: "Question illisible",
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("sortie_invalide");
+    expect(result.llmCalls).toBe(0);
+
+    const row = conversations.getMessage("msg-assistant-1");
+    // la ligne **est** terminale : c'est ce qui libère la conversation
+    expect(row?.status).toBe("failed");
+    expect(turnInFlight(row)).toBe(false);
+    // et l'étape invalide est tracée, non facturée (rien n'a été exécuté)
+    const turn = parseConversationTurn(row?.run ?? null);
+    expect(turn.steps.at(-1)).toMatchObject({ action: "invalid", charged: false });
+    expect(turn.internal_steps).toBe(0);
   });
 
   it("un rejeu du même tour ne rappelle pas le modèle et réécrit la même réponse", async () => {
@@ -853,7 +914,9 @@ describe("worker : job conversation", () => {
 
     expect(jobs.getById(job.id)?.status).toBe("done");
     expect(conversations.getMessage(job.id)?.status).toBe("failed");
-    expect(readTurn(conversations, job.id).failure).toBe("step_budget_exhausted");
+    // le modèle ne fait que rechercher : les explorations facturées s'arrêtent à `budget − 1`,
+    // puis les refus (non facturés) s'enchaînent — et au troisième, le tour s'arrête et le dit
+    expect(readTurn(conversations, job.id).failure).toBe("refus_repete");
   });
 
   it("conversation disparue : aucune ligne orpheline, aucun appel LLM, et le job repart en file", async () => {

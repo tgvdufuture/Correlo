@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
   CornerDownLeft,
+  FileText,
+  FolderOpen,
   Globe,
   Loader2,
   MessageSquare,
@@ -20,9 +22,12 @@ import {
   CONVERSATION_ACTION_LABEL,
   CONVERSATION_FAILURE_LABEL,
   EVIDENCE_PROBLEM_LABEL,
+  STEP_FAILURE_LABEL,
   WEB_PROBLEM_LABEL,
   WEB_REFUSAL_LABEL,
   WEB_UNLOCK_REASON_LABEL,
+  WORKSPACE_PROBLEM_LABEL,
+  WORKSPACE_REFUSAL_LABEL,
   type ClaimProvenanceView,
   type ConversationMessageView,
   type ConversationRunView,
@@ -30,9 +35,19 @@ import {
   type ConversationView as ConversationViewData,
 } from "@/lib/api-types";
 
-/** Un motif d'échec d'étape : son libellé s'il en a un, le code brut sinon (jamais un blanc). */
+/**
+ * Un motif d'échec d'étape : son libellé s'il en a un, le code brut sinon (jamais un blanc).
+ * Trois familles se mélangent dans la trace d'un tour — les règles du serveur (ex. budget
+ * épuisé), les refus du durcissement réseau, ceux du confinement du workspace — et l'écran
+ * n'a pas à savoir laquelle a parlé.
+ */
 function failureLabel(code: string): string {
-  return WEB_REFUSAL_LABEL[code as keyof typeof WEB_REFUSAL_LABEL] ?? code;
+  return (
+    STEP_FAILURE_LABEL[code] ??
+    WEB_REFUSAL_LABEL[code as keyof typeof WEB_REFUSAL_LABEL] ??
+    WORKSPACE_REFUSAL_LABEL[code as keyof typeof WORKSPACE_REFUSAL_LABEL] ??
+    code
+  );
 }
 
 /**
@@ -180,6 +195,8 @@ export function ConversationView({
     <section className="flex flex-col gap-4">
       {view ? <AnchorBanner anchor={view.anchor} /> : <AnchorBanner anchor={initialAnchor} />}
 
+      {view?.workspace_root ? <WorkspaceBanner root={view.workspace_root} /> : null}
+
       {!conversationId ? (
         <p className="text-sm text-muted-foreground">
           Posez une question : l&apos;agent lit le corpus (il cherche, élargit, puis
@@ -276,6 +293,25 @@ export function ConversationView({
         </div>
       ) : null}
     </section>
+  );
+}
+
+/**
+ * Ce que l'agent a le droit de lire sur cette machine (AC3). L'écran **dit la racine, il ne
+ * la choisit pas** : un sélecteur de dossier serait un écran de réglages, et la racine vit
+ * dans `WORKSPACE_ROOT`. L'afficher est en revanche nécessaire — un agent qui lit des
+ * fichiers locaux doit dire lesquels, sinon la lecture reste invisible.
+ */
+function WorkspaceBanner({ root }: { root: string }) {
+  return (
+    <p className="flex flex-wrap items-baseline gap-1.5 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+      <FolderOpen className="size-3.5 shrink-0" />
+      <span>
+        Lecture locale autorisée (lecture seule, confinée) : <code>{root}</code>. Toute
+        affirmation qui cite un fichier est <strong>revérifiée à cet affichage</strong> — un
+        fichier modifié depuis apparaît comme tel.
+      </span>
+    </p>
   );
 }
 
@@ -416,7 +452,9 @@ function ProvenanceView({ provenance }: { provenance: ClaimProvenanceView }) {
     : provenance.problem
       ? provenance.kind === "fragment"
         ? EVIDENCE_PROBLEM_LABEL[provenance.problem]
-        : WEB_PROBLEM_LABEL[provenance.problem]
+        : provenance.kind === "url"
+          ? WEB_PROBLEM_LABEL[provenance.problem]
+          : WORKSPACE_PROBLEM_LABEL[provenance.problem]
       : "non vérifiable";
   return (
     <li className="flex flex-col gap-0.5">
@@ -427,7 +465,7 @@ function ProvenanceView({ provenance }: { provenance: ClaimProvenanceView }) {
             <span className="font-medium">[{provenance.index}]</span>{" "}
             {provenance.source_title ?? provenance.source_id} · {provenance.locator}
           </>
-        ) : (
+        ) : provenance.kind === "url" ? (
           <>
             <Globe className="mr-1 inline size-3" />
             <span className="font-medium">W{provenance.index}</span>{" "}
@@ -442,6 +480,13 @@ function ProvenanceView({ provenance }: { provenance: ClaimProvenanceView }) {
             <span className="break-all">{provenance.url}</span> · copie lue le{" "}
             {provenance.retrieved_at.slice(0, 10)}
           </>
+        ) : (
+          <>
+            <FileText className="mr-1 inline size-3" />
+            <span className="font-medium">F{provenance.index}</span>{" "}
+            <span className="font-mono">{provenance.path}</span> lignes {provenance.from_line}
+            -{provenance.to_line} · lu le {provenance.read_at.slice(0, 10)}
+          </>
         )}
         {problem ? (
           <span className="pl-1 font-medium text-destructive">
@@ -452,6 +497,12 @@ function ProvenanceView({ provenance }: { provenance: ClaimProvenanceView }) {
       <p className="max-h-28 overflow-auto text-xs whitespace-pre-wrap text-muted-foreground">
         {provenance.kind === "fragment" ? provenance.text : provenance.excerpt}
       </p>
+      {provenance.kind === "file" ? (
+        <p className="text-xs text-muted-foreground">
+          Le fichier est relu <strong>maintenant</strong> : contrairement à une copie web, une
+          citation `chemin:ligne` ne vieillit pas, elle cesse d&apos;être appuyée.
+        </p>
+      ) : null}
     </li>
   );
 }
@@ -480,6 +531,30 @@ function RunView({ run }: { run: ConversationRunView }) {
       <p className="pt-2 text-muted-foreground">
         Web : {webReason} (seuil : {run.web_unlock_min_evidence} fragment(s) utilisable(s)).
       </p>
+      {run.workspace_reads.length > 0 ? (
+        <div className="pt-2">
+          <p className="text-muted-foreground">
+            Fichiers du workspace ({run.workspace_reads.length})
+            {run.workspace_root ? ` — racine : ${run.workspace_root}` : ""} :
+          </p>
+          <ul className="flex flex-col gap-0.5">
+            {run.workspace_reads.map((r) => (
+              <li key={r.index} className="flex flex-wrap items-center gap-1.5">
+                <span className="font-medium">F{r.index}</span>
+                <span className="font-mono">{r.path}</span>
+                <span className="text-muted-foreground">
+                  lignes {r.from_line}-{r.to_line}
+                </span>
+                {r.failure ? (
+                  <Badge variant="destructive">{failureLabel(r.failure)}</Badge>
+                ) : (
+                  <Badge variant="secondary">lue le {r.read_at.slice(0, 10)}</Badge>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       {run.web_results.length > 0 ? (
         <div className="pt-2">
           <p className="text-muted-foreground">
@@ -523,6 +598,14 @@ function RunView({ run }: { run: ConversationRunView }) {
               {step.input.query ? <span>« {step.input.query} »</span> : null}
               {step.input.fragment !== undefined ? <span>[{step.input.fragment}]</span> : null}
               {step.input.result !== undefined ? <span>W{step.input.result}</span> : null}
+              {step.input.path ? (
+                <span className="font-mono">{step.input.path}</span>
+              ) : null}
+              {step.input.from !== undefined || step.input.to !== undefined ? (
+                <span>
+                  lignes {step.input.from ?? 1}-{step.input.to ?? "…"}
+                </span>
+              ) : null}
               {step.added.length > 0 ? <span>+{step.added.length} fragment(s)</span> : null}
               {step.web_added && step.web_added.length > 0 ? (
                 <span>+{step.web_added.length} résultat(s) web</span>

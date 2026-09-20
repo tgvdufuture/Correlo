@@ -88,6 +88,18 @@ const envSchema = z
     EXA_API_KEY: z.string().optional(),
     /** Résultats rendus par une recherche web (borne le prompt et le coût). */
     WEB_SEARCH_RESULTS: z.coerce.number().int().positive().max(10).default(5),
+    /**
+     * Racine du **workspace** (Phase 6, AC3) : le dossier local que l'agent a le droit de
+     * lire, en lecture seule.
+     *
+     * Vide ⇒ **l'outil n'existe pas** dans la liste exposée au modèle — c'est la même façon
+     * de rendre une contrainte vraie par construction que le web sans connecteur. Ce n'est
+     * pas une erreur à l'exécution : c'est le défaut, et une Phase 6 complète sans lui.
+     *
+     * Le réglage désigne une racine, jamais un dossier choisi par l'écran : un sélecteur de
+     * dossier serait un écran de réglages, hors AC3 (§13.5).
+     */
+    WORKSPACE_ROOT: z.string().optional(),
     OLLAMA_BASE_URL: z.string().min(1).default("http://localhost:11434"),
     OLLAMA_EMBED_MODEL: z.string().min(1).default("nomic-embed-text"),
     OLLAMA_CHAT_MODEL: z.string().optional(),

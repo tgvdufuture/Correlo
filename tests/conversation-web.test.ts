@@ -370,6 +370,19 @@ describe("la règle de déverrouillage (constat serveur)", () => {
     expect(llm.prompts[1]).toContain("seules les pages lues sont citables");
     expect(llm.prompts[1]).toContain("Étapes web restantes : 3");
 
+    // Le **texte** d'une page lue entre dans le prompt (v7), comme celui d'un fragment de
+    // catalogue. Défaut corrigé : jusqu'à la v6, le prompt ne portait que le titre, l'URL et
+    // le mot « LU — citable », donc le modèle était invité à citer une page qu'il n'avait
+    // jamais vue et rédigeait l'affirmation depuis ses propres connaissances — exactement ce
+    // que « aucune connaissance externe » interdit. Le texte non lu, lui, n'y est pas.
+    expect(llm.prompts[1]).not.toContain("<page>");
+    // le texte n'arrive qu'**après** read_page (l'étape 3 du tour, donc le prompt 4ᵉ appel)
+    expect(llm.prompts[2]).not.toContain("<page>");
+    expect(llm.prompts[3]).toContain("<page>");
+    expect(llm.prompts[3]).toContain("La mesure experimentale fixe les conditions");
+    // et les deux pages restent distinguées : la non lue n'est pas citable
+    expect(llm.prompts[3]).toContain("trouvé, non lu — non citable");
+
     // la lecture du tour est vérifiée **sans réseau** : la copie correspond à la lecture
     const view = createConversationReviewService(db).read("conv-1");
     const claims = view?.messages[1].claims ?? [];
