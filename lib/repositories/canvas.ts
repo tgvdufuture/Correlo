@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { nowIso, type Db } from "@/lib/db/client";
+import { ATELIER_CANVAS_ID } from "@/lib/repositories/canvases";
 import {
   decodeConstruction,
   type ConstructionRow,
@@ -175,15 +176,23 @@ export function createCanvasRepo(db: Db): CanvasRepo {
       // disposée serait invisible : on nettoie et on complète avant de lire
       this.prune();
       this.placeMissing();
+      // depuis la 010, l'atelier est **un** canvas parmi d'autres : son état ne
+      // montre que ses frames (et les items hors frame, qui lui appartiennent)
       const frames = db
-        .prepare("SELECT * FROM canvas_frames ORDER BY z ASC, rowid ASC")
-        .all() as CanvasFrame[];
+        .prepare(
+          `SELECT * FROM canvas_frames WHERE canvas_id = ?
+           ORDER BY z ASC, rowid ASC`
+        )
+        .all(ATELIER_CANVAS_ID) as CanvasFrame[];
       const rows = db
         .prepare(
           `SELECT item_kind, item_ref, x, y, z, frame_id
-           FROM canvas_items ORDER BY z ASC, rowid ASC`
+           FROM canvas_items
+           WHERE frame_id IS NULL
+              OR frame_id IN (SELECT id FROM canvas_frames WHERE canvas_id = ?)
+           ORDER BY z ASC, rowid ASC`
         )
-        .all() as (ItemPlacement & { item_kind: CanvasItemKind; item_ref: string })[];
+        .all(ATELIER_CANVAS_ID) as (ItemPlacement & { item_kind: CanvasItemKind; item_ref: string })[];
 
       // les deux entités jointes en une requête chacune (jamais N+1)
       const constructionRefs = rows.filter((r) => r.item_kind === "construction");
@@ -313,10 +322,13 @@ export function createCanvasRepo(db: Db): CanvasRepo {
           z: number;
         }).z ?? 0) + 1;
       db.prepare(
-        `INSERT INTO canvas_frames (id, label, kind, x, y, width, height, color, z, created_at, updated_at)
-         VALUES (@id, @label, @kind, @x, @y, @width, @height, @color, @z, @created_at, @updated_at)`
+        `INSERT INTO canvas_frames (id, canvas_id, label, kind, x, y, width, height, color, z, created_at, updated_at)
+         VALUES (@id, @canvas_id, @label, @kind, @x, @y, @width, @height, @color, @z, @created_at, @updated_at)`
       ).run({
         id,
+        // l'atelier crée ses frames chez lui — un cadre est posé dans l'écran
+        // qui l'a demandé (les autres tableaux passeront par l'étape 2/3)
+        canvas_id: ATELIER_CANVAS_ID,
         label: f.label,
         kind: f.kind,
         x: f.x,
