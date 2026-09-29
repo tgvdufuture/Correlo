@@ -5,6 +5,7 @@ import { contentSig } from "@/lib/discover/epistemic";
 import { encodeEmbedding } from "@/lib/llm/embedding-codec";
 
 import { createConversationsRepo } from "@/lib/repositories/conversations";
+import { createConversationCanvasRepo } from "@/lib/repositories/conversation-canvases";
 import { createSynthesesRepo } from "@/lib/repositories/syntheses";
 import { createFragmentsRepo } from "@/lib/repositories/fragments";
 import { createSourcesRepo } from "@/lib/repositories/sources";
@@ -118,6 +119,7 @@ async function setup() {
     db,
     conversations,
     syntheses: createSynthesesRepo(db),
+    canvasLinks: createConversationCanvasRepo(db),
     fragments,
     sources,
     chat: llm,

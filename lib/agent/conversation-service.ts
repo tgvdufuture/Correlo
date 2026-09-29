@@ -45,6 +45,7 @@ import {
 } from "@/lib/agent/conversation-types";
 import { DEFAULT_AGENT_CATALOGUE_SIZE, DEFAULT_AGENT_PAGE_SIZE } from "@/lib/agent/types";
 import type { ConversationsRepo, MessageRow } from "@/lib/repositories/conversations";
+import type { ConversationCanvasRepo } from "@/lib/repositories/conversation-canvases";
 import type { SynthesesRepo } from "@/lib/repositories/syntheses";
 import type { FragmentsRepo } from "@/lib/repositories/fragments";
 import type { SourcesRepo } from "@/lib/repositories/sources";
@@ -163,6 +164,8 @@ export class ConversationService {
       db: Db;
       conversations: ConversationsRepo;
       syntheses: SynthesesRepo;
+      /** Les tableaux ancrés d'une conversation (multi-ancrage v1.6, AC5). */
+      canvasLinks: ConversationCanvasRepo;
       fragments: FragmentsRepo;
       sources: SourcesRepo;
       chat: LlmProvider;
@@ -226,7 +229,12 @@ export class ConversationService {
     };
 
     const history = this.loadHistory(conversationId, opts);
-    const seed = this.seedCatalogue(conversation.anchor_kind, conversation.anchor_ref);
+    const seed = this.seedCatalogue(
+      conversation.anchor_kind,
+      conversation.anchor_ref,
+      conversationId,
+      catalogueSize
+    );
     const doc: ConversationTurn = {
       prompt_version: CONVERSATION_PROMPT_VERSION,
       chat_model: this.deps.chatModel,
@@ -535,31 +543,24 @@ export class ConversationService {
    */
   private seedCatalogue(
     anchorKind: "synthesis" | "corpus",
-    anchorRef: string | null
+    anchorRef: string | null,
+    conversationId: string,
+    catalogueSize: number
   ): {
     entries: CatalogueEntry[];
     synthesisText?: string | null;
     synthesisStale?: boolean;
     anchorMissing: boolean;
   } {
-    if (anchorKind !== "synthesis" || !anchorRef) {
-      return { entries: [], anchorMissing: false };
-    }
-    const synthesis = this.deps.syntheses.getById(anchorRef);
-    if (!synthesis) {
-      return { entries: [], anchorMissing: true };
-    }
     const entries: CatalogueEntry[] = [];
-    let evidenceIds: string[] = [];
-    try {
-      const parsed = JSON.parse(synthesis.evidence_fragment_ids) as unknown;
-      if (Array.isArray(parsed)) evidenceIds = parsed.filter((x): x is string => typeof x === "string");
-    } catch {
-      evidenceIds = [];
-    }
-    for (const id of evidenceIds) {
+    let synthesisText: string | null = null;
+    let synthesisStale = false;
+    let anchorMissing = false;
+    const pushFragment = (id: string): void => {
+      if (entries.length >= catalogueSize) return;
+      if (entries.some((e) => e.fragment_id === id)) return; // un fragment n'entre qu'une fois
       const f = this.deps.fragments.getById(id);
-      if (!f) continue;
+      if (!f) return; // fragment disparu : sauté, jamais inventé (AC1)
       entries.push(
         toCatalogueEntry(
           {
@@ -574,12 +575,74 @@ export class ConversationService {
           "seed"
         )
       );
+    };
+    if (anchorKind === "synthesis" && anchorRef) {
+      const synthesis = this.deps.syntheses.getById(anchorRef);
+      if (!synthesis) {
+        anchorMissing = true;
+      } else {
+        synthesisText = synthesis.text;
+        synthesisStale = synthesis.stale === 1;
+        let evidenceIds: string[] = [];
+        try {
+          const parsed = JSON.parse(synthesis.evidence_fragment_ids) as unknown;
+          if (Array.isArray(parsed)) evidenceIds = parsed.filter((x): x is string => typeof x === "string");
+        } catch {
+          evidenceIds = [];
+        }
+        for (const id of evidenceIds) pushFragment(id);
+      }
+    }
+    // ── le multi-ancrage (v1.6 §14.5 AC5) ──────────────────────────────────
+    // Les constructions posées sur les **tableaux ancrés** entrent dans le
+    // catalogue de départ : leurs extraits (fragments de preuve) et les fragments
+    // de leurs paires parentes (la suggestion 2A qui les a produites). Le plafond
+    // du catalogue borne le tout ; l'ordre suit la collection (épinglés, position)
+    // puis la position sur le plan — déterministe, rejouable à l'identique.
+    for (const canvasId of this.deps.canvasLinks.listForConversation(conversationId)) {
+      if (entries.length >= catalogueSize) break;
+      const constructionRefs = (
+        this.deps.db
+          .prepare(
+            `SELECT item_ref FROM canvas_items
+             WHERE canvas_id = ? AND item_kind = 'construction'
+             ORDER BY z ASC, rowid ASC`
+          )
+          .all(canvasId) as { item_ref: string }[]
+      ).map((r) => r.item_ref);
+      for (const ref of constructionRefs) {
+        if (entries.length >= catalogueSize) break;
+        const c = this.deps.db
+          .prepare("SELECT suggestion_id FROM constructions WHERE id = ?")
+          .get(ref) as { suggestion_id: string | null } | undefined;
+        if (!c) continue; // orphelin : le dépôt de l'atelier purge, le tour n'attend pas
+        // les extraits d'abord (les fragments de preuve de l'énoncé)
+        const evidence = this.deps.db
+          .prepare("SELECT evidence_fragment_ids FROM constructions WHERE id = ?")
+          .get(ref) as { evidence_fragment_ids: string };
+        try {
+          const parsed = JSON.parse(evidence.evidence_fragment_ids) as unknown;
+          if (Array.isArray(parsed)) for (const id of parsed) if (typeof id === "string") pushFragment(id);
+        } catch {
+          // snapshot illisible : la construction entre par ses paires, sans extraits
+        }
+        // puis la paire parente (les deux fragments de la suggestion 2A)
+        if (c.suggestion_id) {
+          const sg = this.deps.db
+            .prepare("SELECT fragment_a_id, fragment_b_id FROM suggestions WHERE id = ?")
+            .get(c.suggestion_id) as { fragment_a_id: string; fragment_b_id: string } | undefined;
+          if (sg) {
+            pushFragment(sg.fragment_a_id);
+            pushFragment(sg.fragment_b_id);
+          }
+        }
+      }
     }
     return {
       entries,
-      synthesisText: synthesis.text,
-      synthesisStale: synthesis.stale === 1,
-      anchorMissing: false,
+      synthesisText,
+      synthesisStale,
+      anchorMissing,
     };
   }
 

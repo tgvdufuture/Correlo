@@ -3,6 +3,7 @@ import type { z } from "zod";
 import { makeFragment, makeTestDb, makeTextSource } from "./helpers";
 import { encodeEmbedding } from "@/lib/llm/embedding-codec";
 import { createConversationsRepo, conversationTitle } from "@/lib/repositories/conversations";
+import { createConversationCanvasRepo } from "@/lib/repositories/conversation-canvases";
 import { createSynthesesRepo } from "@/lib/repositories/syntheses";
 import { createFragmentsRepo } from "@/lib/repositories/fragments";
 import { createSourcesRepo } from "@/lib/repositories/sources";
@@ -222,6 +223,7 @@ function makeService(
     db,
     conversations: createConversationsRepo(db),
     syntheses: createSynthesesRepo(db),
+    canvasLinks: createConversationCanvasRepo(db),
     fragments: createFragmentsRepo(db),
     sources: createSourcesRepo(db),
     chat,

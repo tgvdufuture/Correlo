@@ -10,10 +10,12 @@ import {
   turnInFlight,
   type ConversationsRepo,
 } from "@/lib/repositories/conversations";
+import { createConversationCanvasRepo } from "@/lib/repositories/conversation-canvases";
 import { createSynthesesRepo } from "@/lib/repositories/syntheses";
 import { createJobsRepo, idempotencyKey, type ClaimedJob } from "@/lib/repositories/jobs";
 import { createFragmentsRepo } from "@/lib/repositories/fragments";
 import { createSourcesRepo } from "@/lib/repositories/sources";
+import { createSuggestionsRepo } from "@/lib/repositories/suggestions";
 import { ConversationService } from "@/lib/agent/conversation-service";
 import {
   CONVERSATION_STEP_BUDGET,
@@ -154,6 +156,7 @@ function makeService(
     db,
     conversations: createConversationsRepo(db),
     syntheses: createSynthesesRepo(db),
+    canvasLinks: createConversationCanvasRepo(db),
     fragments: createFragmentsRepo(db),
     sources: createSourcesRepo(db),
     chat,
@@ -973,5 +976,143 @@ describe("worker : job conversation", () => {
     const other = conversationTurnJobKey("conv-1", "msg-2");
     expect(k1).toBe(same);
     expect(k1).not.toBe(other);
+  });
+});
+
+describe("multi-ancrage — les constructions des tableaux ancrés entrent dans le catalogue (v1.6 AC5)", () => {
+  /** Un tableau + une construction posée dessus (extraits + paire parente). */
+  function seedAnchoredCanvas(
+    db: ReturnType<typeof makeTestDb>["db"],
+    canvasId: string,
+    constructionId: string,
+    opts: { evidence: string[]; suggestionId?: string }
+  ): void {
+    const now = "2026-09-29T10:00:00.000Z";
+    db.prepare(
+      `INSERT INTO canvases (id, label, color, is_default, pinned, position, created_at, updated_at)
+       VALUES (?, 'Tableau de test', NULL, 0, 0, 2, ?, ?)`
+    ).run(canvasId, now, now);
+    db.prepare(
+      `INSERT INTO constructions (id, text, epistemic_status, parent_source_ids, evidence_fragment_ids,
+         suggestion_id, depth, stale, provenance_snapshot)
+       VALUES (?, 'Une construction ancrée.', 'INFERENCE', '[]', ?, ?, 1, 0, '[]')`
+    ).run(constructionId, JSON.stringify(opts.evidence), opts.suggestionId ?? null);
+    db.prepare(
+      `INSERT INTO canvas_items (item_kind, item_ref, x, y, z, canvas_id, frame_id, created_at, updated_at)
+       VALUES ('construction', ?, 10, 10, 1, ?, NULL, ?, ?)`
+    ).run(constructionId, canvasId, now, now);
+  }
+
+  it("les extraits des constructions des tableaux ancrés rejoignent le catalogue de départ", async () => {
+    const { db, fA } = setup();
+    seedAnchoredCanvas(db, "canvas-ancré", "c-1", { evidence: [fA] });
+    const { conversations } = startTurn(db, "Que disent mes notes ?");
+    createConversationCanvasRepo(db).link("conv-1", "canvas-ancré");
+    // le constat d'exploration (§13.4) vaut aussi avec un seed non vide : une
+    // étape search d'abord, la réponse ensuite — sinon la réponse est refusée
+    const llm = new ScriptedLlm([
+      { action: "search", query: "mesure" },
+      { action: "answer", claims: [{ text: "Le doute écarte le probable.", citations: [0] }] },
+    ]);
+    const result = await makeService(db, llm).run("conv-1", {
+      messageId: "msg-assistant-1",
+      questionMessageId: "msg-user-1",
+      question: "Que disent mes notes ?",
+    });
+
+    expect(result.status).toBe("done");
+    const turn = readTurn(conversations, "msg-assistant-1");
+    // l'extrait de la construction ancrée est **dans le catalogue de départ** (origin seed)
+    expect(turn.catalogue.map((e) => e.fragment_id)).toContain(fA);
+    expect(turn.catalogue[0]?.origin).toBe("seed");
+    // l'affirmation qui cite l'indice du seed est vérifiable comme le reste (AC1)
+    expect(result.unsourced).toBe(0);
+  });
+
+  it("la paire parente d'une construction (sa suggestion) entre aussi dans le catalogue", async () => {
+    const { db, s1, fA, fB } = setup();
+    // une suggestion parente dont les fragments sont HORS extraits de la construction
+    const sg = createSuggestionsRepo(db).create({
+      claim: "Paire parente de test.",
+      relation_type: "analogy",
+      tier: "medium",
+      fragment_a_id: fB,
+      fragment_b_id: fA,
+      pair_key: `${fB}|${fA}`,
+      content_sig: contentSig("Paire parente de test."),
+      epistemic_status: "INFERENCE",
+      prompt_version: "pv",
+      chat_model: "m",
+    });
+    if (!sg.ok) throw new Error("suggestion de test refusée");
+    seedAnchoredCanvas(db, "canvas-ancré", "c-1", {
+      evidence: ["frag-inexistant"], // sauté : jamais inventé
+      suggestionId: sg.id,
+    });
+    const { conversations } = startTurn(db, "Que disent mes notes ?");
+    createConversationCanvasRepo(db).link("conv-1", "canvas-ancré");
+    const llm = new ScriptedLlm([
+      { action: "answer", claims: [{ text: "Les deux corpus se répondent.", citations: [0] }] },
+    ]);
+    await makeService(db, llm).run("conv-1", {
+      messageId: "msg-assistant-1",
+      questionMessageId: "msg-user-1",
+      question: "Que disent mes notes ?",
+    });
+
+    const turn = readTurn(conversations, "msg-assistant-1");
+    const ids = turn.catalogue.map((e) => e.fragment_id);
+    // les deux fragments de la paire parente sont là ; le fragment disparu ne l'est pas
+    expect(ids).toContain(fB);
+    expect(ids).toContain(fA);
+    expect(ids).not.toContain("frag-inexistant");
+    // ...et la source de chaque entrée est celle du fragment (jamais devinée)
+    const entry = turn.catalogue.find((e) => e.fragment_id === fA)!;
+    expect(entry.source_id).toBe(s1);
+  });
+
+  it("le plafond du catalogue borne le seed multi-ancré (débordement impossible)", async () => {
+    const { db, fA, fB } = setup();
+    // deux tableaux ancrés, deux constructions, quatre extraits voulus — pour un
+    // catalogue plafonné à 3 : le tout entre, tronqué, sans jamais dépasser
+    const { conversations } = startTurn(db, "Que disent mes notes ?");
+    seedAnchoredCanvas(db, "canvas-a", "c-a", { evidence: [fA, fB] });
+    seedAnchoredCanvas(db, "canvas-b", "c-b", { evidence: [fA] });
+    createConversationCanvasRepo(db).link("conv-1", "canvas-a");
+    createConversationCanvasRepo(db).link("conv-1", "canvas-b");
+    const llm = new ScriptedLlm([
+      { action: "search", query: "mesure" },
+      { action: "answer", claims: [{ text: "Une affirmation.", citations: [0] }] },
+    ]);
+    const result = await makeService(db, llm).run("conv-1", {
+      messageId: "msg-assistant-1",
+      questionMessageId: "msg-user-1",
+      question: "Que disent mes notes ?",
+      catalogueSize: 3,
+    });
+
+    expect(result.status).toBe("done");
+    const turn = readTurn(conversations, "msg-assistant-1");
+    // le plafond vaut pour le seed **et** pour ce que l'exploration ajoute ensuite
+    expect(turn.catalogue.length).toBeLessThanOrEqual(3);
+    // et le seed a pris sa part : les extraits des deux tableaux ancrés sont là
+    expect(turn.catalogue.map((e) => e.fragment_id)).toEqual(expect.arrayContaining([fA, fB]));
+  });
+
+  it("sans tableau ancré, le catalogue est celui d'avant (aucune régression)", async () => {
+    const { db, fA, fB } = setup();
+    const synthId = seedSynthesis(db, [fA, fB]);
+    const { conversations } = startTurn(db, "La mesure prolonge-t-elle le doute ?", { anchor: synthId });
+    const llm = new ScriptedLlm([
+      { action: "answer", claims: [{ text: "Réponse.", citations: [0] }] },
+    ]);
+    await makeService(db, llm).run("conv-1", {
+      messageId: "msg-assistant-1",
+      questionMessageId: "msg-user-1",
+      question: "La mesure prolonge-t-elle le doute ?",
+    });
+    const turn = readTurn(conversations, "msg-assistant-1");
+    // seulement les preuves de la synthèse ancrée : aucun canvas ancré n'ajoute quoi que ce soit
+    expect(turn.catalogue.map((e) => e.fragment_id).sort()).toEqual([fA, fB].sort());
   });
 });

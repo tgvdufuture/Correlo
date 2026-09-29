@@ -26,6 +26,7 @@ import {
   type ConversationRunResult,
 } from "@/lib/agent/conversation-service";
 import { createInvestigationsRepo } from "@/lib/repositories/investigations";
+import { createConversationCanvasRepo } from "@/lib/repositories/conversation-canvases";
 import { createWebTools } from "@/lib/agent/web-tools";
 import { createConversationsRepo } from "@/lib/repositories/conversations";
 import { createWorkspace } from "@/lib/agent/workspace";
@@ -764,6 +765,7 @@ export function createWorker(): Worker {
     syntheses,
     fragments,
     sources,
+    canvasLinks: createConversationCanvasRepo(db),
     chat: llm,
     chatModel: getChatModelName(),
     chatSignature,
