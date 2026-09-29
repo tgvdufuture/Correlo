@@ -1,6 +1,6 @@
 ---
 name: karpathy-guidelines
-description: Behavioral guidelines for careful, simple, verifiable coding. Use when writing, reviewing, or refactoring code to surface assumptions, make surgical changes, avoid overcomplication, define success criteria, and track project progress when a PRD exists.
+description: Behavioral guidelines for careful, simple, verifiable coding. Use when writing, reviewing, or refactoring code to surface assumptions, make surgical changes, avoid overcomplication, find or reuse existing repositories and libraries before building new code, define success criteria, and track project progress when a PRD exists.
 license: MIT
 ---
 
@@ -31,6 +31,34 @@ Before implementing:
 - If you write 200 lines and it could be 50, rewrite it.
 
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 2.5 Reuse Before You Build
+
+**A tested repository beats a fresh attempt - when it actually removes work. Search before you write.**
+
+At project initialization:
+- Search broadly: repositories, templates, libraries, tools. Anything that does part or all of what was asked.
+- If a candidate implements part or all of it, download it and keep coding from there.
+- The initial request authorizes this search and download. State in one line what you took and why, then continue.
+
+In an existing project:
+- Search when the task is non-trivial or the user asks. Check the project's own dependencies first - the answer is often already installed.
+- Present at most 3 useful candidates with their tradeoffs, then wait for approval before adding or downloading one.
+- An explicit instruction ("find and install something for X") counts as approval.
+
+The only filter: does it do part or all of the job, better than writing it myself? Popularity, stars, and recency are not filters. Read the actual code, README, and tests before trusting it.
+
+Report, don't gate: maintenance status, dependency footprint, open advisories. One blocker only - if the license is incompatible with the project or how it will be distributed, stop and ask.
+
+When installing:
+- Use the project's existing package manager and lockfile. No global installs, no `sudo`, no mixing managers.
+- Pin a stable release. No prereleases, no opportunistic upgrades of unrelated dependencies.
+- Change only the manifest, the lockfile, the integration code, and the tests or config they require.
+- Don't claim it works before the install, tests, and build actually pass.
+
+If nothing fits, or the install fails: stop, report the candidates you rejected and why, and write the smallest local version. Timebox the search - 3 candidates read in depth, then decide.
+
+Record the decision in the progress tracker (§5): repository, version, license, one-line reason.
 
 ## 3. Surgical Changes
 
