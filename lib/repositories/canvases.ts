@@ -212,10 +212,19 @@ export function createCanvasesRepo(db: Db): CanvasesRepo {
         //    coquilles vides. Le `ON DELETE SET NULL` de `canvas_items.frame_id`
         //    fait le reste : les objets rangés dedans repassent « hors frame »,
         //    **leurs positions ne bougent pas** (sémantique existante d'une
-        //    dissolution, §14.5 AC1 : l'atelier les montre, récupérables).
+        //    dissolution, §14.5 AC1). Depuis la 011, un item porte **son** canvas :
+        //    il reste au tableau supprimé... qui disparaît — l'atelier est le seul
+        //    réceptacle pour ces orphelins (§14.2 : « l'atelier a un hors canvas »).
         const frames = db
           .prepare("DELETE FROM canvas_frames WHERE canvas_id = ?")
           .run(id).changes;
+        // 1bis. les items **hors frame** du tableau condamné sont relogés chez
+        //    l'atelier (le réceptacle) : un item ne peut pas survivre à un canvas
+        //    absent (FK NOT NULL de la 011) — positions intactes, aucun objet
+        //    n'est détruit (§14.5 AC1).
+        db.prepare(
+          "UPDATE canvas_items SET canvas_id = 'canvas-atelier', updated_at = ? WHERE canvas_id = ? AND frame_id IS NULL"
+        ).run(nowIso(), id);
         // 2. les liaisons de conversations partent avec le tableau (CASCADE de la
         //    010, explicite ici pour les compter) : les conversations restent,
         //    hors tableau (§14.5 AC4)
@@ -229,31 +238,24 @@ export function createCanvasesRepo(db: Db): CanvasesRepo {
     },
 
     counts(id) {
-      const canvas = db.prepare("SELECT is_default FROM canvases WHERE id = ?").get(id) as
-        | { is_default: number }
-        | undefined;
+      const canvas = db.prepare("SELECT 1 AS ok FROM canvases WHERE id = ?").get(id);
       if (!canvas) return { frames: 0, constructions: 0, sources: 0, conversations: 0 };
-      // l'appartenance d'un item se lit **par sa frame** — sauf « hors frame »,
-      // qui appartient à l'atelier (le réceptacle, §14.2)
-      const horsFrame = canvas.is_default === 1 ? "OR ci.frame_id IS NULL" : "";
+      // depuis la 011, un item porte **son** canvas (`canvas_items.canvas_id`) :
+      // l'appartenance ne se déduit plus de la frame ni du réceptacle
       const frames = (db.prepare("SELECT COUNT(*) AS n FROM canvas_frames WHERE canvas_id = ?").get(id) as { n: number }).n;
       const constructions = (
         db
           .prepare(
-            `SELECT COUNT(*) AS n FROM canvas_items ci
-             LEFT JOIN canvas_frames f ON f.id = ci.frame_id
-             WHERE (f.canvas_id = @id ${horsFrame}) AND ci.item_kind = 'construction'`
+            "SELECT COUNT(*) AS n FROM canvas_items WHERE canvas_id = ? AND item_kind = 'construction'"
           )
-          .get({ id }) as { n: number }
+          .get(id) as { n: number }
       ).n;
       const sources = (
         db
           .prepare(
-            `SELECT COUNT(*) AS n FROM canvas_items ci
-             LEFT JOIN canvas_frames f ON f.id = ci.frame_id
-             WHERE (f.canvas_id = @id ${horsFrame}) AND ci.item_kind = 'source'`
+            "SELECT COUNT(*) AS n FROM canvas_items WHERE canvas_id = ? AND item_kind = 'source'"
           )
-          .get({ id }) as { n: number }
+          .get(id) as { n: number }
       ).n;
       const conversations = (
         db

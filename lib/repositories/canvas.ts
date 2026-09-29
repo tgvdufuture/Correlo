@@ -145,8 +145,14 @@ const MARGIN = 60;
 
 const NEXT_Z = `COALESCE((SELECT MAX(z) FROM canvas_items), 0) + 1`;
 
-export function createCanvasRepo(db: Db): CanvasRepo {
+export function createCanvasRepo(db: Db, canvasId: string = ATELIER_CANVAS_ID): CanvasRepo {
   const sourcesRepo = createSourcesRepo(db);
+  /**
+   * Le canvas que **cet** écran sert. L'atelier garde le défaut (appel sans
+   * argument = comportement historique inchangé) ; l'écran focalisé (`/canvas/[id]`,
+   * v1.6 §14.2) passe l'id du tableau qu'il affiche — lectures, placements et
+   * créations de frames opèrent tous sur **ce** canvas.
+   */
 
   /** Première case libre : on complète la rangée du bas, puis on descend. */
   const slotFor = (): { x: number; y: number } => {
@@ -164,10 +170,22 @@ export function createCanvasRepo(db: Db): CanvasRepo {
 
   const insertItem = (kind: CanvasItemKind, ref: string, x: number, y: number): void => {
     const now = nowIso();
+    // Un item vit sur **un seul** plan (PK globale). Deux cas au conflit :
+    //  - **même tableau** : le dépôt re-joué ne bouge rien (positions absolues,
+    //    idempotence historique — rejouer une requête ne déplace pas l'item) ;
+    //  - **autre tableau** : c'est un **déplacement entre plans** — le geste
+    //    explicite de l'utilisateur (`INSERT OR IGNORE` laisserait l'item sur
+    //    l'autre plan, un silence inacceptable pour un dépôt qui répond 2xx).
+    // L'item est posé **hors frame** dans CE tableau : le rangement dans un
+    // conteneur est un geste séparé (`assign`).
     db.prepare(
-      `INSERT OR IGNORE INTO canvas_items (item_kind, item_ref, x, y, z, frame_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ${NEXT_Z}, NULL, ?, ?)`
-    ).run(kind, ref, x, y, now, now);
+      `INSERT INTO canvas_items (item_kind, item_ref, x, y, z, canvas_id, frame_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ${NEXT_Z}, ?, NULL, ?, ?)
+       ON CONFLICT (item_kind, item_ref) DO UPDATE SET
+         x = excluded.x, y = excluded.y, z = excluded.z,
+         canvas_id = excluded.canvas_id, frame_id = NULL, updated_at = excluded.updated_at
+         WHERE canvas_items.canvas_id != excluded.canvas_id`
+    ).run(kind, ref, x, y, canvasId, now, now);
   };
 
   return {
@@ -176,23 +194,22 @@ export function createCanvasRepo(db: Db): CanvasRepo {
       // disposée serait invisible : on nettoie et on complète avant de lire
       this.prune();
       this.placeMissing();
-      // depuis la 010, l'atelier est **un** canvas parmi d'autres : son état ne
-      // montre que ses frames (et les items hors frame, qui lui appartiennent)
+      // depuis la 010, l'atelier est **un** canvas parmi d'autres : l'état ne montre
+      // que les frames **de ce canvas** (et ses items hors frame, qui lui appartiennent)
       const frames = db
         .prepare(
           `SELECT * FROM canvas_frames WHERE canvas_id = ?
            ORDER BY z ASC, rowid ASC`
         )
-        .all(ATELIER_CANVAS_ID) as CanvasFrame[];
+        .all(canvasId) as CanvasFrame[];
       const rows = db
         .prepare(
           `SELECT item_kind, item_ref, x, y, z, frame_id
            FROM canvas_items
-           WHERE frame_id IS NULL
-              OR frame_id IN (SELECT id FROM canvas_frames WHERE canvas_id = ?)
+           WHERE canvas_id = ?
            ORDER BY z ASC, rowid ASC`
         )
-        .all(ATELIER_CANVAS_ID) as (ItemPlacement & { item_kind: CanvasItemKind; item_ref: string })[];
+        .all(canvasId) as (ItemPlacement & { item_kind: CanvasItemKind; item_ref: string })[];
 
       // les deux entités jointes en une requête chacune (jamais N+1)
       const constructionRefs = rows.filter((r) => r.item_kind === "construction");
@@ -237,6 +254,15 @@ export function createCanvasRepo(db: Db): CanvasRepo {
     },
 
     placeMissing() {
+      // **Portée du placement : ce canvas.** Une entité déjà posée sur un autre
+      // tableau a sa ligne `canvas_items` — elle ne sera pas re-placée ici
+      // (`PRIMARY KEY (item_kind, item_ref)`) : un item vit sur **un seul** plan.
+      // L'atelier reste le seul à placer **automatiquement** (ingestion, constructions
+      // acceptées) : un objet arrive dans un autre tableau par un geste explicite
+      // (déposer, ranger) — jamais en masse.
+      if (canvasId !== ATELIER_CANVAS_ID) {
+        return 0;
+      }
       const orphans = db
         .prepare(
           `SELECT c.id AS ref FROM constructions c
@@ -287,14 +313,15 @@ export function createCanvasRepo(db: Db): CanvasRepo {
       if (items.length === 0) return 0;
       const now = nowIso();
       // seuls les éléments existants bougent : une position ne crée pas d'élément
-      // pour une entité inconnue
+      // pour une entité inconnue — et un déplacement reste **dans le canvas** de
+      // l'écran qui l'a demandé : le client ne porte pas la vérité de l'appartenance
       const update = db.prepare(
         `UPDATE canvas_items SET
            x = @x,
            y = @y,
            frame_id = CASE WHEN @has_frame = 1 THEN @frame_id ELSE frame_id END,
            updated_at = @updated_at
-         WHERE item_kind = @kind AND item_ref = @ref`
+         WHERE item_kind = @kind AND item_ref = @ref AND canvas_id = @canvas_id`
       );
       const tx = db.transaction(() => {
         let moved = 0;
@@ -306,6 +333,7 @@ export function createCanvasRepo(db: Db): CanvasRepo {
             y: item.y,
             has_frame: item.frame_id === undefined ? 0 : 1,
             frame_id: item.frame_id ?? null,
+            canvas_id: canvasId,
             updated_at: now,
           }).changes;
         }
@@ -326,9 +354,9 @@ export function createCanvasRepo(db: Db): CanvasRepo {
          VALUES (@id, @canvas_id, @label, @kind, @x, @y, @width, @height, @color, @z, @created_at, @updated_at)`
       ).run({
         id,
-        // l'atelier crée ses frames chez lui — un cadre est posé dans l'écran
-        // qui l'a demandé (les autres tableaux passeront par l'étape 2/3)
-        canvas_id: ATELIER_CANVAS_ID,
+        // le cadre est posé dans l'écran qui l'a demandé : l'atelier chez lui,
+        // le tableau focalisé chez lui (v1.6 §14.2)
+        canvas_id: canvasId,
         label: f.label,
         kind: f.kind,
         x: f.x,

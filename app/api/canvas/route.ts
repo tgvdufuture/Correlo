@@ -1,15 +1,21 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db/client";
 import { createCanvasRepo } from "@/lib/repositories/canvas";
+import { createCanvasesRepo } from "@/lib/repositories/canvases";
 import { createReviewService } from "@/lib/discover/review-service";
 import { getEmbeddingSpace } from "@/lib/llm/active-space";
 import { listCorpusSpaces, sameSpace, type EmbeddingSpace } from "@/lib/llm/embedding-space";
 import type { EmbeddingSpaceState } from "@/lib/api-types";
 
 /**
- * GET /api/canvas — l'état de l'atelier : les conteneurs, les **éléments** (les
+ * GET /api/canvas — l'état d'un tableau : les conteneurs, les **éléments** (les
  * fichiers déposés et les Constructions, avec leur provenance et leur `stale`) et
  * les **liens** que l'IA propose entre les fichiers.
+ *
+ * `?canvas=<id>` (v1.6 §14.2) sert le tableau demandé — l'écran focalisé de
+ * l'explorateur ; sans paramètre, l'atelier (comportement historique, la page
+ * principale et le worker n'ont pas changé). Un id inconnu est un 404 nommé,
+ * pas un 500.
  *
  * Un fichier sans disposition, ou une Construction sans disposition, est placé
  * avant lecture (`placeMissing`) : le canvas ne peut rien cacher. Les liens sont
@@ -25,9 +31,15 @@ import type { EmbeddingSpaceState } from "@/lib/api-types";
  * comparés à rien — l'écran le montre au lieu de laisser croire que toute la
  * bibliothèque participe à l'analyse.
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
   const db = getDb();
-  const state = createCanvasRepo(db).getState();
+  const requested = new URL(req.url).searchParams.get("canvas");
+  const canvas = requested ? createCanvasesRepo(db).getById(requested) : null;
+  if (requested && !canvas) {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
+  // sans `?canvas=` : l'atelier — createCanvasRepo accepte `undefined` = défaut
+  const state = createCanvasRepo(db, canvas?.id ?? undefined).getState();
   const sourceRefs = state.items.filter((i) => i.kind === "source").map((i) => i.ref);
   const links = createReviewService(db).linksFor(sourceRefs);
   const rows = db
@@ -41,7 +53,13 @@ export async function GET() {
     pending: rows.find((r) => r.status === "pending")?.n ?? 0,
     running: rows.find((r) => r.status === "running")?.n ?? 0,
   };
-  return NextResponse.json({ ...state, links, discovery, embeddingSpace: embeddingSpaceState() });
+  return NextResponse.json({
+    ...state,
+    canvas,
+    links,
+    discovery,
+    embeddingSpace: embeddingSpaceState(),
+  });
 }
 
 /**

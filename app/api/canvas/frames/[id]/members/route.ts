@@ -5,6 +5,7 @@ import {
   type CanvasItemKind,
   type ItemRef,
 } from "@/lib/repositories/canvas";
+import { createCanvasesRepo } from "@/lib/repositories/canvases";
 
 const KINDS: CanvasItemKind[] = ["construction", "source"];
 
@@ -48,7 +49,14 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return NextResponse.json({ code: "invalid_payload", message: "assign doit être un booléen" }, { status: 400 });
   }
 
-  const canvas = createCanvasRepo(getDb());
+  // le rangement se fait dans le tableau qui porte la frame (`?canvas=`, v1.6) :
+  // l'appartenance de l'écran définit où la frame est cherchée
+  const requested = new URL(req.url).searchParams.get("canvas");
+  const db = getDb();
+  if (requested && !createCanvasesRepo(db).getById(requested)) {
+    return NextResponse.json({ code: "canvas_not_found" }, { status: 404 });
+  }
+  const canvas = createCanvasRepo(db, requested ?? undefined);
   const frames = canvas.getState().frames;
   if (!frames.some((f) => f.id === id)) {
     return NextResponse.json({ code: "not_found" }, { status: 404 });

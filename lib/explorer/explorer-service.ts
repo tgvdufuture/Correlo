@@ -128,12 +128,19 @@ export function createExplorerService(db: Db) {
       }
 
       // ── les items par frame (une requête) + « hors frame » ──────────────
+      // depuis la 011, chaque item porte **son** canvas : « hors frame » n'est plus
+      // synonyme d'atelier — un tableau focalisé peut porter des objets libres
       const itemRows = db
         .prepare(
-          `SELECT frame_id, item_kind, COUNT(*) AS n FROM canvas_items
-           GROUP BY frame_id, item_kind`
+          `SELECT canvas_id, frame_id, item_kind, COUNT(*) AS n FROM canvas_items
+           GROUP BY canvas_id, frame_id, item_kind`
         )
-        .all() as { frame_id: string | null; item_kind: "construction" | "source"; n: number }[];
+        .all() as {
+        canvas_id: string;
+        frame_id: string | null;
+        item_kind: "construction" | "source";
+        n: number;
+      }[];
       const frameIndex = new Map<string, ExplorerFrameSummary>();
       for (const list of framesByCanvas.values()) {
         for (const f of list) frameIndex.set(f.id, f);
@@ -151,8 +158,8 @@ export function createExplorerService(db: Db) {
           if (r.item_kind === "construction") f.constructions += r.n;
           else f.sources += r.n;
         } else {
-          // posé hors frame ⇒ atelier, par construction (§14.2)
-          const u = unframedOf(atelier.id);
+          // posé hors frame ⇒ il appartient à **son** canvas (011, §14.2)
+          const u = unframedOf(r.canvas_id);
           if (r.item_kind === "construction") u.constructions += r.n;
           else u.sources += r.n;
         }
@@ -162,7 +169,7 @@ export function createExplorerService(db: Db) {
       // Une seule lecture de chaque table, quel que soit le nombre de tableaux.
       const placementRows = db
         .prepare(
-          `SELECT item_kind, item_ref, x, y, z, frame_id FROM canvas_items
+          `SELECT item_kind, item_ref, x, y, z, canvas_id, frame_id FROM canvas_items
            ORDER BY z ASC, rowid ASC`
         )
         .all() as {
@@ -171,6 +178,7 @@ export function createExplorerService(db: Db) {
         x: number;
         y: number;
         z: number;
+        canvas_id: string;
         frame_id: string | null;
       }[];
       const constructionRefs = placementRows.filter((p) => p.item_kind === "construction").map((p) => p.item_ref);
@@ -207,11 +215,11 @@ export function createExplorerService(db: Db) {
             }[]);
       const sourceById = new Map(sourceRows.map((s) => [s.id, s]));
       /** frame → canvas : un node se rattache au canvas de **sa** frame. */
-      const frameCanvas = new Map(frameRows.map((f) => [f.id, f.canvas_id]));
       const nodesByCanvas = new Map<string, ExplorerNode[]>();
       for (const p of placementRows) {
-        const canvasId =
-          p.frame_id !== null ? (frameCanvas.get(p.frame_id) ?? atelier.id) : atelier.id;
+        // l'appartenance est **portée par l'item** (011) — la frame ne sert qu'au
+        // rangement ; un item hors frame reste dans son tableau
+        const canvasId = p.canvas_id;
         const base = { ref: p.item_ref, frame_id: p.frame_id, x: p.x, y: p.y, z: p.z };
         const list = nodesByCanvas.get(canvasId) ?? [];
         if (p.item_kind === "construction") {

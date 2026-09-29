@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db/client";
 import { createCanvasRepo, MAX_FRAME_LABEL, type CanvasFrameKind } from "@/lib/repositories/canvas";
+import { createCanvasesRepo } from "@/lib/repositories/canvases";
 
 const KIND: CanvasFrameKind[] = ["frame", "group"];
 
@@ -51,7 +52,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ code: "invalid_color", message: "color doit être une chaîne" }, { status: 400 });
   }
 
-  const frame = createCanvasRepo(getDb()).createFrame({
+  // v1.6 §14.2 : un cadre est posé dans le tableau qui l'a demandé (`?canvas=`),
+  // l'atelier restant le défaut. Un tableau inconnu est refusé avant l'écriture.
+  const requested = new URL(req.url).searchParams.get("canvas");
+  const db = getDb();
+  if (requested && !createCanvasesRepo(db).getById(requested)) {
+    return NextResponse.json({ code: "canvas_not_found" }, { status: 404 });
+  }
+  const frame = createCanvasRepo(db, requested ?? undefined).createFrame({
     label,
     kind: kind as CanvasFrameKind,
     x: b.x,

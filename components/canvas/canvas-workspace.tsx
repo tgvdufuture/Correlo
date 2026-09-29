@@ -91,7 +91,15 @@ const refOf = (key: ItemKey): ItemRef => {
   return { kind: key.slice(0, cut) as CanvasItemKind, ref: key.slice(cut + 1) };
 };
 
-export function CanvasWorkspace() {
+export function CanvasWorkspace({
+  /** Le tableau servi (v1.6 §14.2) — l'atelier par défaut. */
+  canvasId,
+  /** Une frame à **focaliser** au chargement (AC2 : centre + zoom depuis la vignette). */
+  focusFrameId,
+}: {
+  canvasId?: string;
+  focusFrameId?: string;
+} = {}) {
   const [data, setData] = useState<CanvasState | null>(null);
   const [discovery, setDiscovery] = useState<{ pending: number; running: number } | null>(null);
   const [spaceState, setSpaceState] = useState<EmbeddingSpaceState | null>(null);
@@ -144,26 +152,29 @@ export function CanvasWorkspace() {
     }
   }, []);
 
+  /** L'URL de l'état : le tableau demandé, l'atelier si absent. */
+  const stateUrl = "/api/canvas" + (canvasId ? `?canvas=${encodeURIComponent(canvasId)}` : "");
+
   const load = useCallback(async () => {
     try {
-      const res = await fetch("/api/canvas");
+      const res = await fetch(stateUrl);
       if (!res.ok) throw new Error(String(res.status));
       apply((await res.json()) as CanvasPayload);
     } catch {
       setError("Canvas indisponible — vérifiez que le serveur répond.");
     }
-  }, [apply]);
+  }, [apply, stateUrl]);
 
   useEffect(() => {
     // chargement initial (setState asynchrone, hors rendu synchrone)
-    void fetch("/api/canvas")
+    void fetch(stateUrl)
       .then((res) => (res.ok ? (res.json() as Promise<CanvasPayload>) : null))
       .then((next) => {
         if (next) apply(next);
         else setError("Canvas indisponible — vérifiez que le serveur répond.");
       })
       .catch(() => setError("Canvas indisponible — vérifiez que le serveur répond."));
-  }, [apply]);
+  }, [apply, stateUrl]);
 
   // l'IA travaille : on relit régulièrement, sinon les liens n'apparaîtraient qu'au
   // rechargement manuel — or c'est précisément ce qu'on attend après un dépôt
@@ -261,6 +272,33 @@ export function CanvasWorkspace() {
     );
     setView({ zoom, x: 80 - minX * zoom, y: 80 - minY * zoom });
   }, []);
+
+  /**
+   * Le **focalisé** (AC2) : une frame demandée par l'explorateur est centrée et
+   * zoomée au premier chargement — pas au fil des relectures, sinon l'utilisateur
+   * qui panerait serait ramené de force. Le zoom sature à 1 (une grande frame est
+   * montrée entière, une petite est lue à taille réelle, jamais agrandie).
+   */
+  const focusedRef = useRef(false);
+  useEffect(() => {
+    if (focusedRef.current || !data || !focusFrameId) return;
+    const frame = data.frames.find((f) => f.id === focusFrameId);
+    if (!frame) return;
+    focusedRef.current = true;
+    const rect = surfaceRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const cx = frame.x + frame.width / 2;
+    const cy = frame.y + frame.height / 2;
+    const zoom = Math.min(
+      1,
+      Math.max(
+        MIN_ZOOM,
+        Math.min(rect.width / (frame.width + 160), rect.height / (frame.height + 160))
+      )
+    );
+    setView({ zoom, x: rect.width / 2 - cx * zoom, y: rect.height / 2 - cy * zoom });
+    setSelectedFrame(frame.id);
+  }, [data, focusFrameId]);
 
   /* -------------------------------- persistance ------------------------------ */
 

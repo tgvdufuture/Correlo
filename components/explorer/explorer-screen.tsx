@@ -135,6 +135,11 @@ export function ExplorerScreen() {
     [load]
   );
 
+  /** Le rechargement de données pour les gestes qui ne passent pas par `act` (les modales). */
+  const refresh = useCallback(async () => {
+    setSnap(await load());
+  }, [load]);
+
   /** Le bouton « Réessayer » : même geste que l'effet de montage, depuis un clic. */
   const retry = useCallback(() => {
     void load()
@@ -420,7 +425,10 @@ export function ExplorerScreen() {
                 {open.totals.conversations} conversation(s)
               </span>
               <Button size="sm" variant="outline" className="ml-auto" asChild>
-                <Link href={`/canvas/${open.id}`}>Ouvrir dans l&apos;atelier</Link>
+                {/* AC2 : si une frame est sélectionnée, le focalisé centre dessus */}
+                <Link href={`/canvas/${open.id}${sel?.kind === "frame" ? `?frame=${sel.id}` : ""}`}>
+                  Plein écran
+                </Link>
               </Button>
               <Button size="sm" onClick={() => {
                 setConvTarget(open.id);
@@ -446,7 +454,12 @@ export function ExplorerScreen() {
               ))}
               {open.frames.length === 0 && <p className="text-xs text-muted-foreground">Aucune frame dans ce tableau.</p>}
             </div>
-            <CanvasVignette canvas={open} selectedNodeId={sel?.kind === "node" ? sel.id : null} onSelect={(ref) => setSel({ kind: "node", id: ref })} />
+            <CanvasVignette
+              canvas={open}
+              selectedNodeId={sel?.kind === "node" ? sel.id : null}
+              onSelect={(ref) => setSel({ kind: "node", id: ref })}
+              onSelectFrame={(id) => setSel({ kind: "frame", id })}
+            />
           </>
         )}
       </section>
@@ -465,10 +478,18 @@ export function ExplorerScreen() {
         />
       </aside>
 
-      <NewCanvasModal open={newOpen} onClose={() => setNewOpen(false)} onCreated={(id) => {
-        setNewOpen(false);
-        setOpenCanvasId(id);
-      }} />
+      <NewCanvasModal
+        open={newOpen}
+        onClose={() => setNewOpen(false)}
+        onCreated={(id) => {
+          setNewOpen(false);
+          setOpenCanvasId(id);
+        }}
+        refresh={refresh}
+      />
+      {/* la création recharge le snapshot **avant** `onCreated` : sans lui,
+          `openCanvasId` désigne un canvas absent du snapshot périmé et la grille
+           ne montre jamais la nouvelle carte */}
       {/* Montée conditionnelle : l'état de la modale se réinitialise au montage,
           sans effet de remise à zéro (react-hooks/set-state-in-effect). */}
       {convOpen && (
@@ -484,10 +505,13 @@ function CanvasVignette({
   canvas,
   selectedNodeId,
   onSelect,
+  onSelectFrame,
 }: {
   canvas: Snapshot["canvases"][number];
   selectedNodeId: string | null;
   onSelect: (ref: string) => void;
+  /** La maquette dit « frames cliquables » : un clic sur une frame l'affiche dans l'aperçu. */
+  onSelectFrame: (id: string) => void;
 }) {
   const nodes = canvas.nodes;
   const bounds = useMemo(() => {
@@ -518,6 +542,7 @@ function CanvasVignette({
               borderColor: f.color ? canvasColorClass(f.color).replace("bg-", "border-").replace("/80", "") : "var(--border)",
             }}
             title={`Frame « ${f.label} » — ${f.constructions + f.sources} objet(s)`}
+            onClick={() => onSelectFrame(f.id)}
           >
             <span className="font-semibold">{f.label}</span> <span className="text-muted-foreground">· {f.constructions + f.sources}</span>
           </button>
@@ -553,7 +578,7 @@ function CanvasVignette({
       </div>
       <p className="border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
         ◇ vignette rendue depuis les positions réelles — cliquer un objet le sélectionne (aperçu à droite) ·{" "}
-        <Link className="underline" href={`/canvas/${canvas.id}`}>plein écran dans l&apos;atelier</Link>
+        <Link className="underline" href={`/canvas/${canvas.id}`}>plein écran du tableau</Link>
       </p>
     </div>
   );
@@ -642,7 +667,10 @@ function Preview({
             <MessageSquare className="mr-1 size-4" /> Discuter de ça
           </Button>
           <Button size="sm" variant="outline" asChild>
-            <Link href={`/canvas/${openCanvas.id}`}>Ouvrir dans l&apos;atelier</Link>
+            {/* AC2 : l'objet vit peut-être dans une frame — le focalisé l'ouvre dessus */}
+            <Link href={`/canvas/${openCanvas.id}${node.frame_id ? `?frame=${node.frame_id}` : ""}`}>
+              Plein écran
+            </Link>
           </Button>
         </div>
       </div>
@@ -660,6 +688,10 @@ function Preview({
         <div className="mt-2 flex flex-wrap gap-2">
           <Button size="sm" onClick={() => setConvOpen(openCanvas.id)}>
             <MessageSquare className="mr-1 size-4" /> Discuter de ça
+          </Button>
+          <Button size="sm" variant="outline" asChild>
+            {/* AC2 : ouvrir le plan centré sur CETTE frame */}
+            <Link href={`/canvas/${openCanvas.id}?frame=${frame.id}`}>Plein écran</Link>
           </Button>
         </div>
         <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Objets de la frame</p>
@@ -696,7 +728,7 @@ function Preview({
             <MessageSquare className="mr-1 size-4" /> Discuter de ça
           </Button>
           <Button size="sm" variant="outline" asChild>
-            <Link href={`/canvas/${openCanvas.id}`}>Ouvrir dans l&apos;atelier</Link>
+            <Link href={`/canvas/${openCanvas.id}`}>Plein écran</Link>
           </Button>
         </div>
         <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">
@@ -761,10 +793,13 @@ function NewCanvasModal({
   open,
   onClose,
   onCreated,
+  /** Le rechargement du snapshot après création (l'écran reste la vérité de la base). */
+  refresh,
 }: {
   open: boolean;
   onClose: () => void;
   onCreated: (id: string) => void;
+  refresh: () => Promise<void>;
 }) {
   const [label, setLabel] = useState("");
   const [color, setColor] = useState<string | null>(CANVAS_COLORS[2] ?? null);
@@ -783,6 +818,7 @@ function NewCanvasModal({
     if (res.ok) {
       const row = (await res.json()) as { id: string };
       setLabel("");
+      await refresh();
       onCreated(row.id);
     }
   };

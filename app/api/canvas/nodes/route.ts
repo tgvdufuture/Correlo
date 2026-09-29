@@ -5,6 +5,7 @@ import {
   type CanvasItemKind,
   type ItemPosition,
 } from "@/lib/repositories/canvas";
+import { createCanvasesRepo } from "@/lib/repositories/canvases";
 
 const KINDS: CanvasItemKind[] = ["construction", "source"];
 
@@ -78,6 +79,13 @@ export async function PATCH(req: NextRequest) {
     });
   }
 
-  const moved = createCanvasRepo(getDb()).moveItems(items);
+  // v1.6 §14.2 : le focalisé écrit dans **son** tableau (`?canvas=`) — le défaut
+  // reste l'atelier. Un id inconnu est refusé avant toute écriture.
+  const requested = new URL(req.url).searchParams.get("canvas");
+  const db = getDb();
+  if (requested && !createCanvasesRepo(db).getById(requested)) {
+    return NextResponse.json({ code: "canvas_not_found" }, { status: 404 });
+  }
+  const moved = createCanvasRepo(db, requested ?? undefined).moveItems(items);
   return NextResponse.json({ requested: items.length, moved });
 }
