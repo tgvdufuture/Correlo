@@ -1,5 +1,39 @@
 /** Types de l'API bibliothèque (miroir de lib/repositories/sources.ts). */
 
+import type { ExplorerSnapshot } from "@/lib/explorer/explorer-service";
+import type { CanvasColor } from "@/lib/repositories/canvases";
+
+export type { CanvasColor, ExplorerSnapshot };
+
+/**
+ * La palette d'étiquettes (v1.6 §14.3) — **source unique**, importée par le dépôt
+ * (qui valide) et par l'écran (qui dessine). Viv ici plutôt que dans le dépôt :
+ * `lib/api-types` ne porte aucune dépendance serveur, donc l'écran peut l'importer
+ * sans tirer `better-sqlite3` dans le bundle client.
+ */
+export const CANVAS_COLORS = [
+  "red",
+  "amber",
+  "green",
+  "cyan",
+  "blue",
+  "violet",
+] as const;
+
+/** Les classes Tailwind d'une étiquette : la couleur de la donnée, jamais du code appelant. */
+export const CANVAS_COLOR_CLASS: Record<string, string> = {
+  red: "bg-red-500/80",
+  amber: "bg-amber-500/80",
+  green: "bg-emerald-500/80",
+  cyan: "bg-cyan-500/80",
+  blue: "bg-blue-500/80",
+  violet: "bg-violet-500/80",
+};
+
+export function canvasColorClass(color: string | null): string {
+  return (color && CANVAS_COLOR_CLASS[color]) || "bg-muted-foreground/40";
+}
+
 export type JobStatus = "pending" | "running" | "done" | "failed";
 export type SummaryStatus = "pending" | "done" | "failed";
 export type SourceType = "TEXT" | "PDF" | "URL";

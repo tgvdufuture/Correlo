@@ -24,15 +24,13 @@ import { nowIso, type Db } from "@/lib/db/client";
 /** Longueur maximale d'un label de tableau (même règle que les frames). */
 export const MAX_CANVAS_LABEL = 120;
 
-/** L'étiquette couleur, validée côté dépôt (la palette fermée est un choix d'écran). */
-export const CANVAS_COLORS = [
-  "red",
-  "amber",
-  "green",
-  "cyan",
-  "blue",
-  "violet",
-] as const;
+/**
+ * L'étiquette couleur : la palette fermée vit dans `lib/api-types` (source unique,
+ * importable côté client sans dépendance serveur) — le dépôt ne la réimplémente pas,
+ * il la **réexporte** pour que ses validateurs restent les siens.
+ */
+import { CANVAS_COLORS } from "@/lib/api-types";
+export { CANVAS_COLORS };
 export type CanvasColor = (typeof CANVAS_COLORS)[number] | null;
 
 export const ATELIER_CANVAS_ID = "canvas-atelier";

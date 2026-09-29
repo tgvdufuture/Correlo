@@ -3,6 +3,7 @@ import { getDb } from "@/lib/db/client";
 import { createJobsRepo } from "@/lib/repositories/jobs";
 import { createSynthesesRepo } from "@/lib/repositories/syntheses";
 import { conversationTitle, createConversationsRepo } from "@/lib/repositories/conversations";
+import { createConversationCanvasRepo } from "@/lib/repositories/conversation-canvases";
 import { createConversationReviewService } from "@/lib/agent/conversation-review";
 import { conversationTurnJobKey, conversationTurnJobPayload } from "@/lib/agent/queue";
 import { CONVERSATION_PROMPT_VERSION } from "@/lib/agent/conversation-prompts";
@@ -52,6 +53,7 @@ export async function POST(req: NextRequest) {
   const body = (await req.json().catch(() => null)) as {
     question?: unknown;
     anchor?: unknown;
+    canvasIds?: unknown;
   } | null;
   if (!body || typeof body !== "object") {
     return NextResponse.json({ code: "invalid_body" }, { status: 400 });
@@ -94,6 +96,17 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // Multi-ancrage (v1.6 §14.3) : les tableaux cochés par l'écran. La validation des
+  // ids **précède** la création — sinon un tableau inconnu exploserait en 500 (FK)
+  // après avoir créé la conversation : un état à moitié fait. Un doublon est
+  // neutralisé ici plutôt que laissé à la PK composée.
+  const requestedCanvasIds = Array.isArray(body.canvasIds)
+    ? [...new Set(body.canvasIds.filter((x): x is string => typeof x === "string"))]
+    : [];
+  if (requestedCanvasIds.some((id) => !db.prepare("SELECT 1 FROM canvases WHERE id = ?").get(id))) {
+    return NextResponse.json({ code: "canvas_not_found" }, { status: 404 });
+  }
+
   const conversations = createConversationsRepo(db);
   const conversation = conversations.create({
     anchorKind,
@@ -102,6 +115,9 @@ export async function POST(req: NextRequest) {
     chatModel: getChatModelName(),
     promptVersion: CONVERSATION_PROMPT_VERSION,
   });
+  if (requestedCanvasIds.length > 0) {
+    createConversationCanvasRepo(db).setLinks(conversation.id, requestedCanvasIds);
+  }
   const userMessage = conversations.addUserMessage({
     conversationId: conversation.id,
     text: question,

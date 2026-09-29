@@ -34,6 +34,35 @@ export interface ExplorerFrameSummary {
   sources: number;
 }
 
+/**
+ * Un objet **positionné** du plan — ce que la vignette dessine (§14.5 AC2 : depuis
+ * les positions réelles). Deux formes possibles selon la nature :
+ *  - `construction` : le texte de l'énoncé, son statut épistémique, sa peremption ;
+ *  - `source` : le titre tel que la bibliothèque le dérive (jamais une copie).
+ */
+export type ExplorerNode =
+  | {
+      kind: "construction";
+      ref: string;
+      frame_id: string | null;
+      x: number;
+      y: number;
+      z: number;
+      text: string;
+      epistemic_status: string;
+      stale: boolean;
+    }
+  | {
+      kind: "source";
+      ref: string;
+      frame_id: string | null;
+      x: number;
+      y: number;
+      z: number;
+      title: string;
+      fragment_count: number;
+    };
+
 export interface ExplorerConversationRef {
   id: string;
   title: string;
@@ -53,6 +82,8 @@ export interface ExplorerCanvasSummary {
   unframed: { constructions: number; sources: number };
   conversations: ExplorerConversationRef[];
   totals: { frames: number; constructions: number; sources: number; conversations: number };
+  /** Le plan positionné (AC2) : items joints aux entités, hors frame inclus. */
+  nodes: ExplorerNode[];
 }
 
 export type ExplorerRecentEntry =
@@ -127,6 +158,85 @@ export function createExplorerService(db: Db) {
         }
       }
 
+      // ── les nodes positionnés (AC2) : les items joints aux entités ──────
+      // Une seule lecture de chaque table, quel que soit le nombre de tableaux.
+      const placementRows = db
+        .prepare(
+          `SELECT item_kind, item_ref, x, y, z, frame_id FROM canvas_items
+           ORDER BY z ASC, rowid ASC`
+        )
+        .all() as {
+        item_kind: "construction" | "source";
+        item_ref: string;
+        x: number;
+        y: number;
+        z: number;
+        frame_id: string | null;
+      }[];
+      const constructionRefs = placementRows.filter((p) => p.item_kind === "construction").map((p) => p.item_ref);
+      const constructionRows =
+        constructionRefs.length === 0
+          ? []
+          : (db
+              .prepare(
+                `SELECT c.id, c.text, c.epistemic_status, c.stale FROM constructions c
+                 WHERE c.id IN (${constructionRefs.map(() => "?").join(",")})`
+              )
+              .all(...constructionRefs) as {
+              id: string;
+              text: string;
+              epistemic_status: string;
+              stale: number;
+            }[]);
+      const constructionById = new Map(constructionRows.map((c) => [c.id, c]));
+      const sourceRefs = placementRows.filter((p) => p.item_kind === "source").map((p) => p.item_ref);
+      const sourceRows =
+        sourceRefs.length === 0
+          ? []
+          : (db
+              .prepare(
+                `SELECT s.id, s.title,
+                   (SELECT COUNT(*) FROM fragments f WHERE f.source_id = s.id) AS fragment_count
+                 FROM sources s
+                 WHERE s.id IN (${sourceRefs.map(() => "?").join(",")})`
+              )
+              .all(...sourceRefs) as {
+              id: string;
+              title: string | null;
+              fragment_count: number;
+            }[]);
+      const sourceById = new Map(sourceRows.map((s) => [s.id, s]));
+      /** frame → canvas : un node se rattache au canvas de **sa** frame. */
+      const frameCanvas = new Map(frameRows.map((f) => [f.id, f.canvas_id]));
+      const nodesByCanvas = new Map<string, ExplorerNode[]>();
+      for (const p of placementRows) {
+        const canvasId =
+          p.frame_id !== null ? (frameCanvas.get(p.frame_id) ?? atelier.id) : atelier.id;
+        const base = { ref: p.item_ref, frame_id: p.frame_id, x: p.x, y: p.y, z: p.z };
+        const list = nodesByCanvas.get(canvasId) ?? [];
+        if (p.item_kind === "construction") {
+          const c = constructionById.get(p.item_ref);
+          if (!c) continue; // course avec une suppression : le dépôt de l'atelier purge
+          list.push({
+            kind: "construction",
+            ...base,
+            text: clip(c.text),
+            epistemic_status: c.epistemic_status,
+            stale: c.stale === 1,
+          });
+        } else {
+          const s = sourceById.get(p.item_ref);
+          if (!s) continue;
+          list.push({
+            kind: "source",
+            ...base,
+            title: s.title ?? "Sans titre",
+            fragment_count: s.fragment_count,
+          });
+        }
+        nodesByCanvas.set(canvasId, list);
+      }
+
       // ── les conversations par canvas (une requête) ──────────────────────
       const convRows = db
         .prepare(
@@ -172,6 +282,7 @@ export function createExplorerService(db: Db) {
             sources: fromFrames.sources + unframed.sources,
             conversations: conversations.length,
           },
+          nodes: nodesByCanvas.get(r.id) ?? [],
         };
       });
 
@@ -194,13 +305,21 @@ export function createExplorerService(db: Db) {
       }
       const recentSynths = db
         .prepare(
-          `SELECT id, text, created_at FROM syntheses
-           WHERE state = 'accepted'
-           ORDER BY created_at DESC, rowid DESC LIMIT 3`
+          `SELECT s.id, s.text, s.created_at FROM syntheses s
+           WHERE s.state = 'accepted'
+           ORDER BY s.created_at DESC, s.rowid DESC LIMIT 3`
         )
         .all() as { id: string; text: string; created_at: string }[];
+      const synthesisTitle = new Map(
+        recentSynths.map((s) => [s.id, clip(s.text)]),
+      );
       for (const s of recentSynths) {
-        candidates.push({ kind: "synthesis", id: s.id, title: clip(s.text), at: s.created_at });
+        candidates.push({
+          kind: "synthesis",
+          id: s.id,
+          title: synthesisTitle.get(s.id) ?? "",
+          at: s.created_at,
+        });
       }
       const seen = new Set<string>();
       const recent = candidates

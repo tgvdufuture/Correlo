@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { makeTestDb } from "./helpers";
+import { makeTestDb, makeTextSource } from "./helpers";
 import {
   ATELIER_CANVAS_ID,
   createCanvasesRepo,
@@ -9,6 +9,9 @@ import { createConversationCanvasRepo } from "@/lib/repositories/conversation-ca
 import { createExplorerService } from "@/lib/explorer/explorer-service";
 import { createConversationsRepo } from "@/lib/repositories/conversations";
 import { nowIso, type Db } from "@/lib/db/client";
+
+/** Passe-partout pour l'assertion `frame_id: null` (le type SQL n'expose pas NULL). */
+const NULL_FRAME = null;
 
 /**
  * Les tableaux (v1.6 §14, migration 010, étape 1).
@@ -296,6 +299,52 @@ describe("service explorateur — le snapshot", () => {
       )
       .get() as { a: number; b: number; c: number; d: string };
     expect(after).toEqual(before);
+  });
+
+  it("les nodes positionnés portent les positions réelles (AC2) et les titres dérivés", () => {
+    const { db } = makeTestDb();
+    db.prepare(
+      `INSERT INTO canvas_frames (id, canvas_id, label, kind, x, y, width, height, z, created_at, updated_at)
+       VALUES ('f-a', ?, 'Framée', 'frame', 0, 0, 600, 400, 1, ?, ?)`
+    ).run(ATELIER_CANVAS_ID, nowIso(), nowIso());
+    // une construction (texte connu) et une source (titre dérivé) — un item
+    // orphelin (construction supprimée) est sauté, jamais inventé
+    db.prepare(
+      `INSERT INTO canvas_items (item_kind, item_ref, x, y, z, frame_id, created_at, updated_at)
+       VALUES ('construction', 'c-1', 30, 40, 1, 'f-a', ?, ?)`
+    ).run(nowIso(), nowIso());
+    db.prepare(
+      `INSERT INTO constructions (id, text, epistemic_status, parent_source_ids, evidence_fragment_ids,
+         suggestion_id, depth, stale, provenance_snapshot)
+       VALUES ('c-1', 'Bernard oppose observation et expérience.', 'INFERENCE', '[]', '[]', NULL, 1, 0, '[]')`
+    ).run();
+    const src = makeTextSource(db, "Contenu de la source");
+    db.prepare(
+      `INSERT INTO canvas_items (item_kind, item_ref, x, y, z, frame_id, created_at, updated_at)
+       VALUES ('source', ?, 250, 60, 2, NULL, ?, ?)`
+    ).run(src, nowIso(), nowIso());
+    db.prepare(
+      `INSERT INTO canvas_items (item_kind, item_ref, x, y, z, frame_id, created_at, updated_at)
+       VALUES ('construction', 'c-fantôme', 99, 99, 3, NULL, ?, ?)`
+    ).run(nowIso(), nowIso());
+
+    const atelier = createExplorerService(db)
+      .snapshot()
+      .canvases.find((c) => c.is_default)!;
+    expect(atelier.nodes).toHaveLength(2); // le fantôme est sauté
+    const c = atelier.nodes.find((n) => n.ref === "c-1");
+    expect(c).toMatchObject({
+      kind: "construction",
+      frame_id: "f-a",
+      x: 30,
+      y: 40,
+      text: "Bernard oppose observation et expérience.",
+      epistemic_status: "INFERENCE",
+      stale: false,
+    });
+    const s = atelier.nodes.find((n) => n.ref === src);
+    expect(s).toMatchObject({ kind: "source", frame_id: NULL_FRAME, x: 250, y: 60 });
+    expect((s as { title: string }).title).toBe("Source de test");
   });
 
   it("l'atelier porte les items hors frame dans son snapshot", () => {
