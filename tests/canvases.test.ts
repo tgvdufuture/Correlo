@@ -363,6 +363,64 @@ describe("service explorateur — le snapshot", () => {
     expect(atelier.unframed).toEqual({ constructions: 0, sources: 1 });
     expect(atelier.totals.sources).toBe(1);
   });
+
+  it("les nodes portent leurs liens IA (AC3) : compteurs, lecture pure", () => {
+    const { db } = makeTestDb();
+    const now = nowIso();
+    const s1 = makeTextSource(db, "Première source.");
+    const s2 = makeTextSource(db, "Seconde source.");
+    const f1 = makeFragment(db, { sourceId: s1, text: "Fragment A." });
+    const f2 = makeFragment(db, { sourceId: s2, text: "Fragment B." });
+    // une suggestion OUVERTE sur la paire, avec une enquête en cours
+    db.prepare(
+      `INSERT INTO suggestions (id, claim, relation_type, tier, state, fragment_a_id, fragment_b_id,
+         pair_key, content_sig, epistemic_status, prompt_version, chat_model)
+       VALUES ('sg-1', 'Paire non tranchée.', 'analogy', 'medium', 'shown', ?, ?, 'pair-1', 'sig-1', 'INFERENCE', 'pv', 'm')`
+    ).run(f1, f2);
+    db.prepare(
+      `INSERT INTO investigations (id, suggestion_id, status, steps, created_at, updated_at)
+       VALUES ('inv-1', 'sg-1', 'done', '[]', ?, ?)`
+    ).run(now, now);
+    // une synthèse proposée citant s1 (parent_source_ids JSON)
+    db.prepare(
+      `INSERT INTO themes (id, run_id, corpus_hash, seed, label, centroid, centroid_dimensions,
+         size, sampler_version, created_at)
+       VALUES ('th-1', 'run-1', 'hash', '1', 'Thème', x'0000803F', 8, 10, 'sv', ?)`
+    ).run(now);
+    db.prepare(
+      `INSERT INTO syntheses (id, text, theme_id, relation_kind, epistemic_status, parent_source_ids,
+         evidence_fragment_ids, provenance_snapshot, content_sig, confidence, state, stale,
+         prompt_version, chat_model, created_at)
+       VALUES ('sy-1', 'Énoncé multi-sources.', 'th-1', 'combination', 'INFERENCE', ?,
+         '[]', '[]', 'sig-sy', 'high', 'proposed', 0, 'pv', 'm', ?)`
+    ).run(JSON.stringify([s1]), now);
+    // une construction posée sur l'atelier (hors suggestion — rien à lier)
+    db.prepare(
+      `INSERT INTO constructions (id, text, epistemic_status, parent_source_ids, evidence_fragment_ids,
+         suggestion_id, depth, stale, provenance_snapshot)
+       VALUES ('c-1', 'Une construction sans suggestion.', 'INFERENCE', '[]', '[]', NULL, 1, 0, '[]')`
+    ).run();
+    db.prepare(
+      `INSERT INTO canvas_items (item_kind, item_ref, x, y, z, canvas_id, frame_id, created_at, updated_at)
+       VALUES ('source', ?, 10, 10, 1, ?, NULL, ?, ?),
+              ('construction', 'c-1', 50, 50, 2, ?, NULL, ?, ?)`
+    ).run(s1, ATELIER_CANVAS_ID, now, now, ATELIER_CANVAS_ID, now, now);
+
+    const snap = createExplorerService(db).snapshot();
+    const atelier = snap.canvases.find((c) => c.is_default)!;
+    const sourceNode = atelier.nodes.find((n) => n.ref === s1);
+    expect(sourceNode).toMatchObject({
+      links: { suggestions: 1, syntheses: 1, investigations: 1 },
+    });
+    const constructionNode = atelier.nodes.find((n) => n.ref === "c-1");
+    // une construction hors suggestion n'a AUCUN lien : rien n'est inventé
+    expect(constructionNode).toMatchObject({
+      links: { suggestions: 0, syntheses: 0, investigations: 0 },
+    });
+    // lecture pure : deux snapshots d'affilée ne changent rien
+    const again = createExplorerService(db).snapshot();
+    expect(again.canvases.find((c) => c.is_default)!.nodes).toEqual(atelier.nodes);
+  });
 });
 
 describe("l'atelier focalisé — le dépôt scopé par tableau (v1.6 §14.2, étape 3)", () => {

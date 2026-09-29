@@ -35,13 +35,28 @@ export interface ExplorerFrameSummary {
 }
 
 /**
+ * Les liens IA d'un objet (§14.5 AC3) : **des compteurs**, pas des listes —
+ * l'aperçu montre « ce qui existe », l'écran expert (/suggestions, /syntheses)
+ * montre le détail et porte les décisions. L'aperçu ne réinvente rien : chaque
+ * action mène à l'écran existant.
+ */
+export interface ExplorerNodeLinks {
+  /** Suggestions **ouvertes** (ni acceptées ni rejetées) concernant l'objet. */
+  suggestions: number;
+  /** Synthèses `proposed` qui citent l'objet parmi leurs sources parentes. */
+  syntheses: number;
+  /** Enquêtes (tout statut) sur les suggestions concernant l'objet. */
+  investigations: number;
+}
+
+/**
  * Un objet **positionné** du plan — ce que la vignette dessine (§14.5 AC2 : depuis
  * les positions réelles). Deux formes possibles selon la nature :
  *  - `construction` : le texte de l'énoncé, son statut épistémique, sa peremption ;
  *  - `source` : le titre tel que la bibliothèque le dérive (jamais une copie).
  */
 export type ExplorerNode =
-  | {
+  | ({
       kind: "construction";
       ref: string;
       frame_id: string | null;
@@ -51,8 +66,8 @@ export type ExplorerNode =
       text: string;
       epistemic_status: string;
       stale: boolean;
-    }
-  | {
+    } & { links: ExplorerNodeLinks })
+  | ({
       kind: "source";
       ref: string;
       frame_id: string | null;
@@ -61,7 +76,7 @@ export type ExplorerNode =
       z: number;
       title: string;
       fragment_count: number;
-    };
+    } & { links: ExplorerNodeLinks });
 
 export interface ExplorerConversationRef {
   id: string;
@@ -197,6 +212,40 @@ export function createExplorerService(db: Db) {
               stale: number;
             }[]);
       const constructionById = new Map(constructionRows.map((c) => [c.id, c]));
+      // ── les liens IA (AC3) — lectures groupées, jamais N+1 ─────────────
+      // (1) par construction : sa suggestion parente et ses enquêtes (UNIQUE).
+      const constructionLinks = new Map<
+        string,
+        { suggestionId: string | null; investigations: number; suggestions: number }
+      >();
+      if (constructionRefs.length > 0) {
+        const rows = db
+          .prepare(
+            `SELECT c.id, c.suggestion_id,
+               (SELECT COUNT(*) FROM investigations i WHERE i.suggestion_id = c.suggestion_id) AS investigations,
+               (SELECT COUNT(*) FROM suggestions sg
+                 WHERE sg.id = c.suggestion_id
+                   AND sg.state NOT IN ('accepted', 'rejected')) AS suggestions
+             FROM constructions c
+             WHERE c.id IN (${constructionRefs.map(() => "?").join(",")})`
+          )
+          .all(...constructionRefs) as {
+          id: string;
+          suggestion_id: string | null;
+          investigations: number;
+          suggestions: number;
+        }[];
+        for (const r of rows) {
+          constructionLinks.set(r.id, {
+            suggestionId: r.suggestion_id,
+            investigations: r.investigations,
+            suggestions: r.suggestions,
+          });
+        }
+      }
+      // (2) par source : suggestions ouvertes la concernant (la paire passe par
+      // les fragments), synthèses proposed qui la citent, enquêtes sur ces
+      // suggestions — plafonnées implicitement par le COUNT (des compteurs).
       const sourceRefs = placementRows.filter((p) => p.item_kind === "source").map((p) => p.item_ref);
       const sourceRows =
         sourceRefs.length === 0
@@ -214,6 +263,44 @@ export function createExplorerService(db: Db) {
               fragment_count: number;
             }[]);
       const sourceById = new Map(sourceRows.map((s) => [s.id, s]));
+      const sourceLinks = new Map<string, ExplorerNodeLinks>();
+      if (sourceRefs.length > 0) {
+        const rows = db
+          .prepare(
+            `SELECT s.id,
+               (SELECT COUNT(*) FROM suggestions sg
+                JOIN fragments fa ON fa.id = sg.fragment_a_id
+                JOIN fragments fb ON fb.id = sg.fragment_b_id
+                WHERE (fa.source_id = s.id OR fb.source_id = s.id)
+                  AND sg.state NOT IN ('accepted', 'rejected')) AS suggestions,
+               (SELECT COUNT(*) FROM syntheses sy
+                WHERE sy.state = 'proposed'
+                  AND EXISTS (SELECT 1 FROM json_each(sy.parent_source_ids) j WHERE j.value = s.id)) AS syntheses,
+               (SELECT COUNT(*) FROM investigations i
+                WHERE EXISTS (
+                  SELECT 1 FROM suggestions sg
+                  JOIN fragments fa ON fa.id = sg.fragment_a_id
+                  JOIN fragments fb ON fb.id = sg.fragment_b_id
+                  WHERE i.suggestion_id = sg.id
+                    AND (fa.source_id = s.id OR fb.source_id = s.id)
+                )) AS investigations
+             FROM sources s
+             WHERE s.id IN (${sourceRefs.map(() => "?").join(",")})`
+          )
+          .all(...sourceRefs) as {
+          id: string;
+          suggestions: number;
+          syntheses: number;
+          investigations: number;
+        }[];
+        for (const r of rows) {
+          sourceLinks.set(r.id, {
+            suggestions: r.suggestions,
+            syntheses: r.syntheses,
+            investigations: r.investigations,
+          });
+        }
+      }
       /** frame → canvas : un node se rattache au canvas de **sa** frame. */
       const nodesByCanvas = new Map<string, ExplorerNode[]>();
       for (const p of placementRows) {
@@ -225,12 +312,18 @@ export function createExplorerService(db: Db) {
         if (p.item_kind === "construction") {
           const c = constructionById.get(p.item_ref);
           if (!c) continue; // course avec une suppression : le dépôt de l'atelier purge
+          const cl = constructionLinks.get(p.item_ref);
           list.push({
             kind: "construction",
             ...base,
             text: clip(c.text),
             epistemic_status: c.epistemic_status,
             stale: c.stale === 1,
+            links: {
+              suggestions: cl?.suggestions ?? 0,
+              syntheses: 0, // une synthèse cite des SOURCES, pas des constructions
+              investigations: cl?.investigations ?? 0,
+            },
           });
         } else {
           const s = sourceById.get(p.item_ref);
@@ -240,6 +333,7 @@ export function createExplorerService(db: Db) {
             ...base,
             title: s.title ?? "Sans titre",
             fragment_count: s.fragment_count,
+            links: sourceLinks.get(p.item_ref) ?? { suggestions: 0, syntheses: 0, investigations: 0 },
           });
         }
         nodesByCanvas.set(canvasId, list);

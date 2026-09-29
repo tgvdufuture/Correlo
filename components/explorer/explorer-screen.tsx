@@ -14,6 +14,7 @@ import {
   PinOff,
   Plus,
   RefreshCw,
+  Search,
   Sparkles,
   Trash2,
 } from "lucide-react";
@@ -661,11 +662,30 @@ function Preview({
         {node.kind === "source" && (
           <p className="mt-2 text-xs text-muted-foreground">{node.fragment_count} fragment(s)</p>
         )}
+        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Liens IA</p>
+        <NodeLinks node={node} />
         <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Agir</p>
         <div className="mt-2 flex flex-wrap gap-2">
           <Button size="sm" onClick={() => setConvOpen(openCanvas.id)}>
             <MessageSquare className="mr-1 size-4" /> Discuter de ça
           </Button>
+          {/* AC3 : chaque action mène à l'écran existant — elle ne le réinvente pas.
+              « Investiguer » n'a de sens que pour une suggestion ; « Synthétiser »
+              n'existe que pour une source (une synthèse cite des sources). */}
+          {node.links.suggestions > 0 && (
+            <Button size="sm" variant="outline" asChild>
+              <Link href="/suggestions">
+                <Search className="mr-1 size-4" /> Investiguer ({node.links.suggestions})
+              </Link>
+            </Button>
+          )}
+          {node.kind === "source" && node.links.syntheses > 0 && (
+            <Button size="sm" variant="outline" asChild>
+              <Link href="/syntheses">
+                <Sparkles className="mr-1 size-4" /> Synthétiser ({node.links.syntheses})
+              </Link>
+            </Button>
+          )}
           <Button size="sm" variant="outline" asChild>
             {/* AC2 : l'objet vit peut-être dans une frame — le focalisé l'ouvre dessus */}
             <Link href={`/canvas/${openCanvas.id}${node.frame_id ? `?frame=${node.frame_id}` : ""}`}>
@@ -783,6 +803,42 @@ function Preview({
       <Button size="sm" className="mt-4" onClick={() => setConvOpen(null)}>
         <MessageSquare className="mr-1 size-4" /> Nouvelle conversation
       </Button>
+    </div>
+  );
+}
+
+/* ────────────────────────── les liens IA d'un objet (AC3) ───────────────────── */
+
+/**
+ * Les liens d'un objet : **des compteurs**, jamais des listes complètes. L'écran
+ * expert (/suggestions, /syntheses) porte le détail et les décisions — l'aperçu
+ * dit « ce qui existe » et les boutons y mènent (AC3 : « chaque action mène aux
+ * écrans existants, elle ne les réinvente pas »).
+ */
+function NodeLinks({ node }: { node: Snapshot["canvases"][number]["nodes"][number] }) {
+  const entries: { label: string; n: number }[] = [
+    { label: node.kind === "construction" ? "suggestion parente" : "suggestion(s) ouverte(s)", n: node.links.suggestions },
+    ...(node.kind === "source" ? [{ label: "synthèse(s) proposée(s)", n: node.links.syntheses }] : []),
+    ...(node.links.investigations > 0 ? [{ label: "enquête(s)", n: node.links.investigations }] : []),
+  ];
+  const active = entries.filter((e) => e.n > 0);
+  if (active.length === 0) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        {node.kind === "source"
+          ? "Aucune connexion proposée pour l'instant — l'analyse tourne en tâche de fond."
+          : "Aucun lien d'analyse — cette construction vient d'une intégration."}
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {active.map((e) => (
+        <Badge key={e.label} variant="outline" className="gap-1.5 font-normal">
+          {e.label}
+          <span className="font-medium">{e.n}</span>
+        </Badge>
+      ))}
     </div>
   );
 }
