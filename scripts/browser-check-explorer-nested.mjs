@@ -87,6 +87,26 @@ const deleteCanvas = async (label) => {
 };
 
 try {
+  /* 0 — reprise des crashs précédents : le check est idempotent OU repart
+     propre. Un run tué en plein parcours laisse ses cartes et ses sources —
+     on les retire d'abord (enfants avant parents). */
+  const preClean = async () => {
+    for (const s of (await fetch(`${BASE}/api/sources`).then((r) => r.json())).filter((s) =>
+      ["check-v163.txt", "drop-fond-plan.txt"].includes(s.title)
+    )) {
+      await fetch(`${BASE}/api/sources/${s.id}`, { method: "DELETE" });
+    }
+    for (const label of ["Canvas dedans", "Canvas clic droit", "Dossier dans l'atelier", "Dossier clic droit"]) {
+      for (;;) {
+        const snap = await fetch(`${BASE}/api/explorer`).then((r) => r.json());
+        const hit = snap.canvases.find((c) => c.label === label);
+        if (!hit) break;
+        await fetch(`${BASE}/api/canvases?id=${encodeURIComponent(hit.id)}`, { method: "DELETE" });
+      }
+    }
+  };
+  await preClean();
+
   await page.goto(`${BASE}/explorer`, { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "Tableaux" }).waitFor({ timeout: 10_000 });
   check("l'explorateur se charge", true);
@@ -134,14 +154,15 @@ try {
   check("ouvrir le dossier : canvas et sous-dossier côte à côte", true);
   await page.screenshot({ path: `${SHOT_DIR}/v162-contenu-mixte.png` });
 
-  /* 4 — « Déplacer vers… » d'un canvas ne propose QUE des dossiers */
+  /* 4 — « Déplacer vers… » propose TOUS les tableaux (v1.6.3 : chaque tableau
+     range — les canvas aussi ; l'atelier est visible et rangé) */
   await card("Canvas dans le dossier").hover();
   await card("Canvas dans le dossier").locator('button[title="Déplacer vers…"]').click();
   await page.getByText(/Déplacer « Canvas dans le dossier » vers…/).waitFor({ timeout: 8_000 });
   const modal = page.locator("div.fixed", { hasText: "Déplacer « Canvas dans le dossier » vers…" });
-  // les canvas de la base (Perso, l'atelier) ne doivent PAS être des cibles
+  // l'atelier doit être proposé (visible !) et Perso aussi (un canvas range)
   const targetTexts = await modal.locator("button").allInnerTexts();
-  check("cibles = dossiers + « À la racine » uniquement", !targetTexts.some((t) => t.includes("Perso")), targetTexts.join(" | ").slice(0, 120));
+  check("cibles = tous les tableaux + « À la racine »", targetTexts.some((t) => t.includes("Atelier")) && targetTexts.some((t) => t.includes("Perso")), targetTexts.join(" | ").slice(0, 120));
   await modal.locator("button", { hasText: "À la racine" }).click();
   await page.getByText("Tableau remis à la racine.").waitFor({ timeout: 8_000 });
   check("déplacement du canvas vers la racine", true);
@@ -196,6 +217,163 @@ try {
     (await card("Sous-dossier B").count()) +
     (await card("Dossier de check").count());
   check("nettoyage : l'arbre du check est parti", residue === 0, `${residue} carte(s)`);
+
+  /* 8 — le clic droit (v1.6.3) : créer canvas et dossier où l'on clique */
+  // le FOND du niveau : l'événement part du h1 (déterministe — des coordonnées
+  // libres risquent de tomber sur une carte) et bouillonne jusqu'à la section
+  await page.getByRole("heading", { name: "Tableaux" }).dispatchEvent("contextmenu");
+  await page.getByText("Nouveau canvas ici").click();
+  await page.getByLabel("Nom").fill("Canvas clic droit");
+  await page.getByRole("button", { name: /Créer le / }).click();
+  await page.getByRole("heading", { name: "Canvas clic droit" }).waitFor({ timeout: 8_000 });
+  check("clic droit fond → « Nouveau canvas ici » → modale → plan ouvert", true);
+  const backBtn2 = (await page.getByRole("button", { name: "Tableaux" }).count())
+    ? page.getByRole("button", { name: "Tableaux" })
+    : page.getByRole("button", { name: "Racine" });
+  await backBtn2.click();
+  await page.getByRole("heading", { name: "Tableaux" }).waitFor({ timeout: 8_000 });
+  if (await page.getByRole("button", { name: "Racine" }).count()) await backToRoot();
+
+  // clic droit SUR une carte dossier : les entrées « dedans » s'y trouvent
+  await page.getByRole("button", { name: "Nouveau dossier" }).first().click();
+  await page.getByLabel("Nom").fill("Dossier clic droit");
+  await page.getByRole("button", { name: /Créer le / }).click();
+  await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
+  await backToRoot();
+  await card("Dossier clic droit").click({ button: "right" });
+  await page.getByText("Nouveau canvas dedans").click();
+  await page.getByLabel("Nom").fill("Canvas dedans");
+  await page.getByRole("button", { name: /Créer le / }).click();
+  await page.getByRole("heading", { name: "Canvas dedans" }).waitFor({ timeout: 8_000 });
+  check("clic droit carte dossier → « Nouveau canvas dedans » → créé DEDANS", true);
+  // le canvas est dans « Dossier clic droit » : on l'y retrouve depuis la racine
+  const backBtn3 = (await page.getByRole("button", { name: "Dossier", exact: true }).count())
+    ? page.getByRole("button", { name: "Dossier", exact: true })
+    : page.getByRole("button", { name: "Tableaux" });
+  await backBtn3.click();
+  await page.getByRole("heading", { name: "Tableaux" }).waitFor({ timeout: 8_000 });
+  if (await page.getByRole("button", { name: "Racine" }).count()) await backToRoot();
+  await card("Dossier clic droit").click();
+  await card("Canvas dedans").waitFor({ timeout: 8_000 });
+  check("le canvas créé par clic droit vit dans le dossier", true);
+  await backToRoot();
+
+  /* 9 — glisser-déposer de fichiers sur une carte canvas (v1.6.3) : le dépôt
+     part DIRECTEMENT vers CE canvas (plus besoin d'ouvrir le plein écran). */
+  // contenu unique par run : le doublon de contenu est un 409 nommé — un run
+  // crashé sans nettoyage ne doit pas faire échouer le run suivant
+  const payload = Buffer.from(`# Check v163\n\nDéposé à ${new Date().toISOString()} par le check navigateur.\n`);
+  const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
+  await page.locator('div[title^="Cliquer : ouvrir"]', { hasText: "Canvas clic droit" }).first().scrollIntoViewIfNeeded();
+  const file = { name: "check-v163.txt", mimeType: "text/plain", buffer: payload.toString("base64") };
+  const dt = dataTransfer;
+  await page.evaluate(([d, f]) => {
+    const transfer = d;
+    const bytes = Uint8Array.from(atob(f.buffer), (ch) => ch.charCodeAt(0));
+    transfer.items.add(new File([bytes], f.name, { type: f.mimeType }));
+  }, [dt, file]);
+  const target = page.locator('div[title^="Cliquer : ouvrir"]', { hasText: "Canvas clic droit" }).first();
+  await target.dispatchEvent("dragenter", { dataTransfer: dt });
+  await target.dispatchEvent("dragover", { dataTransfer: dt });
+  check("survol : l'anneau « Déposer » apparaît sur la carte", await page.getByText(/Déposer dans « Canvas clic droit »/).isVisible());
+  await target.dispatchEvent("drop", { dataTransfer: dt });
+  await page.getByText(/1 fichier\(s\) déposé\(s\) dans « Canvas clic droit »/).waitFor({ timeout: 10_000 });
+  check("drop sur la carte → fichier créé DANS ce canvas (notice nommée)", true);
+  await page.screenshot({ path: `${SHOT_DIR}/v163-drop-carte.png` });
+
+  /* 10 — un dossier n'intercepte PAS le dépôt : le survol retombe sur le fond
+     (le dépôt irait à l'atelier) — jamais un anneau « Déposer dans » SUR le dossier. */
+  await page.evaluate(() => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(["x"], "survol-dossier.txt", { type: "text/plain" }));
+    const cards = [...document.querySelectorAll('div[title^="Cliquer : entrer"]')];
+    const card = cards.find((el) => el.textContent.includes("Dossier clic droit"));
+    card.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  });
+  await page.waitForTimeout(200);
+  check("dragover sur une carte dossier : pas d'anneau sur la carte", (await page.getByText("Déposer dans « Dossier clic droit »").count()) === 0);
+  // le fond reprend le relais : la bannière nomme le réceptacle du niveau (l'atelier ici)
+  check("le fond reprend le relais (dépôt irait à l'atelier)", await page.getByText(/Lâchez pour déposer dans « Atelier »/).isVisible());
+
+  /* 12 — LE scénario signalé (v1.6.3-bis) : « dans l'Atelier, le clic droit
+     crée à la racine ». En vue plan de l'atelier : le menu du fond doit nommer
+     l'atelier, et le dossier doit naître DEDANS. */
+  // la carte ATELIER est un canvas (titre de clic « ouvrir ») : hasText « Atelier »
+  // matcherait aussi un résidu « Dossier dans l'atelier » (carte dossier)
+  await page.locator('div[title^="Cliquer : ouvrir"]', { hasText: "Atelier" }).first().click();
+  await page.getByRole("heading", { name: /Atelier/ }).waitFor({ timeout: 8_000 });
+  check("clic carte Atelier → vue plan de l'atelier", true);
+  await page.getByRole("heading", { name: /Atelier/ }).dispatchEvent("contextmenu");
+  // le menu NE MENT PAS : il annonce le canvas ouvert
+  await page.getByText("Créer dans « Atelier »").waitFor({ timeout: 8_000 });
+  check("le menu du fond nomme le canvas ouvert (plus de mensonge)", true);
+  await page.getByText("Nouveau dossier ici").click();
+  await page.getByLabel("Nom").fill("Dossier dans l'atelier");
+  await page.getByRole("button", { name: /Créer le / }).click();
+  await page.waitForTimeout(400);
+  // la vérité est en base, pas dans un DOM périmé : le parent du créé (snapshot /api/explorer)
+  const created = (await fetch(`${BASE}/api/explorer`).then((r) => r.json())).canvases;
+  check("le dossier créé par clic droit VIT dans l'atelier", created.some((c) => c.label === "Dossier dans l'atelier" && c.parent_id === "canvas-atelier"), JSON.stringify(created.find((c) => c.label === "Dossier dans l'atelier")));
+  // la création d'un dossier fait ENTRER dedans (comportement standard) : le plan
+  // s'est refermé — remonter à la racine puis rouvrir le plan de l'atelier
+  await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
+  await backToRoot();
+  await page.locator('div[title^="Cliquer : ouvrir"]', { hasText: "Atelier" }).first().click();
+  await page.getByRole("heading", { name: /Atelier/ }).waitFor({ timeout: 8_000 });
+  check("retour sur le plan de l'atelier après création du dossier", true);
+  // le dépôt de fichiers sur le fond en vue plan va AUSSI au canvas ouvert
+  const dataTransferPlan = await page.evaluateHandle(() => new DataTransfer());
+  const planB64 = Buffer.from(`# drop fond plan ${Date.now()}`).toString("base64");
+  await page.evaluate(([d, b64]) => {
+    const bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+    d.items.add(new File([bytes], "drop-fond-plan.txt", { type: "text/plain" }));
+  }, [dataTransferPlan, planB64]);
+  const h1Plan = page.getByRole("heading", { name: /Atelier/ });
+  await h1Plan.dispatchEvent("dragover", { dataTransfer: dataTransferPlan });
+  await h1Plan.dispatchEvent("drop", { dataTransfer: dataTransferPlan });
+  await page.getByText(/fichier\(s\) déposé\(s\) dans « Atelier »/).waitFor({ timeout: 10_000 });
+  check("drop sur le fond du plan → fichier DANS l'atelier ouvert", true);
+  // retour + nettoyage : fermer le plan (browseIn est null → « Tableaux »),
+  // puis « Contenu (n) » — la nouvelle entrée v1.6.3-bis — pour voir ce que
+  // l'atelier RANGE et supprimer le dossier dedans
+  await page.getByRole("button", { name: "Tableaux" }).click();
+  await page.getByRole("heading", { name: "Tableaux" }).waitFor({ timeout: 8_000 });
+  await page.locator('div[title^="Cliquer : ouvrir"]', { hasText: "Atelier" }).first().click();
+  await page.getByRole("heading", { name: /Atelier/ }).waitFor({ timeout: 8_000 });
+  await page.getByRole("button", { name: /Contenu \(/ }).click();
+  await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
+  check("« Contenu (n) » montre ce que le canvas range", await card("Dossier dans l'atelier").count() === 1);
+  await deleteCanvas("Dossier dans l'atelier");
+  await backToRoot();
+  const cleanPlan = async (name) => {
+    const all = await fetch(`${BASE}/api/sources`).then((r) => r.json());
+    for (const hit of all.filter((s) => s.title === name)) {
+      await fetch(`${BASE}/api/sources/${hit.id}`, { method: "DELETE" });
+    }
+  };
+  await cleanPlan("drop-fond-plan.txt");
+
+  /* 13 — nettoyage du pass v1.6.3 (DELETE /api/sources/:id existe) */
+  const cleanSource = async (name) => {
+    const res = await fetch(`${BASE}/api/sources`);
+    const all = await res.json();
+    const hits = all.filter((s) => s.title === name);
+    if (hits.length === 0) return false;
+    for (const hit of hits) {
+      const del = await fetch(`${BASE}/api/sources/${hit.id}`, { method: "DELETE" });
+      if (del.status !== 200 && del.status !== 204) return false;
+    }
+    return true;
+  };
+  const cleaned1 = await cleanSource("check-v163.txt");
+  check("nettoyage : la source du check est partie", cleaned1 === true);
+  await deleteCanvas("Canvas clic droit"); // à la racine
+  // « Canvas dedans » vit DANS « Dossier clic droit » : entrer, supprimer, sortir
+  await card("Dossier clic droit").click();
+  await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
+  await deleteCanvas("Canvas dedans");
+  await backToRoot();
+  await deleteCanvas("Dossier clic droit");
 } catch (e) {
   check("ERREUR de parcours", false, e.message);
   await page.screenshot({ path: `${SHOT_DIR}/v162-echec.png` });

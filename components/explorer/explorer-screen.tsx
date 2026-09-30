@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -22,6 +22,7 @@ import {
   Search,
   Sparkles,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -83,6 +84,21 @@ export function ExplorerScreen() {
   const [newParentId, setNewParentId] = useState<string | null>(null);
   const [convOpen, setConvOpen] = useState(false);
   const [convTarget, setConvTarget] = useState<string | null>(null);
+  /* v1.6.3 — le clic droit contextuel : la position écran du menu, et SUR QUOI
+     il porte (un canvas, un dossier, ou le fond du niveau visité). Une seule
+     entrée d'état : le menu se ferme en rendant null. */
+  const [menu, setMenu] = useState<
+    { x: number; y: number; target: Snapshot["canvases"][number] | null } | null
+  >(null);
+  /* Le glisser-déposer de fichiers (v1.6.3) : la carte canvas (ou la vignette)
+     qui reçoit le dépôt — pour l'anneau visuel et le compteur. */
+  const [dropOn, setDropOn] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(0);
+  /** Le champ fichier caché du clic droit « Ajouter des fichiers… » (v1.6.3) : un
+   *  input ne s'ouvre QUE d'un geste utilisateur — l'entrée de menu préserve la
+   *  chaîne, et cette ref retient la cible entre le clic et le changement. */
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [menuUploadCanvasId, setMenuUploadCanvasId] = useState<string | null>(null);
 
   // `load` est **pur** : il rend le snapshot ou jette, sans setState — les appels
   // décident. L'effet de montage pose ses setState dans le `.then` (jamais avant
@@ -112,6 +128,49 @@ export function ExplorerScreen() {
   const canvases = useMemo(() => snap?.canvases ?? [], [snap]);
   const open = openCanvasId ? canvases.find((c) => c.id === openCanvasId) ?? null : null;
   const pinned = canvases.filter((c) => c.pinned);
+  /** Les sous-tableaux du canvas ouvert (v1.6.3-bis : un canvas aussi range —
+   *  il faut pouvoir VOIR ce qu'il contient sans passer par la racine). */
+  const openChildCount = open ? canvases.filter((c) => c.parent_id === open.id).length : 0;
+  /** Les fichiers déposés (v1.6.3) partent vers le canvas ciblé — glisser sur la
+   *  carte du dépose dedans, sans passer par le plein écran. Un dépôt posé sur le
+   *  fond va à l'atelier (le réceptacle). Les refus nommés de l'API deviennent
+   *  des phrases, jamais des silences. */
+  const uploadFiles = useCallback(
+    async (canvasId: string, files: FileList | File[]) => {
+      const list = [...files];
+      if (list.length === 0) return;
+      setUploading((n) => n + list.length);
+      setNotice(null);
+      const created: string[] = [];
+      const problems: string[] = [];
+      for (const file of list) {
+        const form = new FormData();
+        form.set("type", file.name.toLowerCase().endsWith(".pdf") ? "PDF" : "TEXT");
+        form.set("file", file);
+        form.set("canvas_id", canvasId);
+        try {
+          const res = await fetch("/api/sources", { method: "POST", body: form });
+          if (res.status === 201) created.push(file.name);
+          else if (res.status === 409) problems.push(`${file.name} : déjà présent`);
+          else if (res.status === 422) problems.push(`${file.name} : PDF sans texte extractible`);
+          else {
+            const body = (await res.json().catch(() => ({}))) as { code?: string };
+            problems.push(`${file.name} : ${body.code ?? `refusé (${res.status})`}`);
+          }
+        } catch {
+          problems.push(`${file.name} : envoi impossible`);
+        }
+      }
+      setUploading((n) => Math.max(0, n - list.length));
+      if (created.length > 0) {
+        const target = canvases.find((c) => c.id === canvasId);
+        setNotice(`${created.length} fichier(s) déposé(s) dans « ${target?.label ?? "Atelier"} » — ingestion en cours.`);
+        setSnap(await load());
+      }
+      if (problems.length > 0) setError(problems.join(" · "));
+    },
+    [canvases, load]
+  );
   /**
    * Le niveau affiché (v1.6.2 : les dossiers) : les enfants du dossier visité —
    * **sous-dossiers et canvas mélangés**, comme un explorateur de fichiers — ou
@@ -124,6 +183,10 @@ export function ExplorerScreen() {
     );
   }, [canvases, browseInId]);
   const browseIn = browseInId ? canvases.find((c) => c.id === browseInId) ?? null : null;
+  /** La cible des dépôts « à côté des cartes » : l'atelier (le réceptacle).
+   *  Déduit du snapshot (`is_default`) — la constante serveur vit dans un module
+   *  node, jamais importable côté client. */
+  const atelierId = canvases.find((c) => c.is_default)?.id ?? null;
   /** Le chemin de « Entrer » (le fil d'Ariane de la grille), racine d'abord. */
   const browseTrail = useMemo(() => {
     const trail: Snapshot["canvases"] = [];
@@ -134,9 +197,12 @@ export function ExplorerScreen() {
     }
     return trail;
   }, [browseIn, canvases]);
-  /** Les cibles de « Déplacer vers » : les **dossiers** uniquement (ce qui se range
-   *  va dans un conteneur, v1.6.2), sauf soi et ses descendants (un cycle serait
-   *  refusé par la base — l'écran ne propose même pas, c'est plus honnête). */
+  /**
+   * Les cibles de « Déplacer vers » : **tous les autres tableaux** (v1.6.3 —
+   * n'importe quel tableau range : l'atelier, un canvas, un dossier), sauf soi
+   * et ses descendants (un cycle serait refusé par la base — l'écran ne propose
+   * même pas, c'est plus honnête).
+   */
   const moveTargets = useMemo(() => {
     if (!sel || sel.kind !== "canvas") return [];
     const forbidden = new Set<string>([sel.id]);
@@ -151,7 +217,7 @@ export function ExplorerScreen() {
         }
       }
     }
-    return canvases.filter((c) => c.kind === "folder" && !forbidden.has(c.id));
+    return canvases.filter((c) => !forbidden.has(c.id));
   }, [sel, canvases]);
   const conversations = useMemo(
     () =>
@@ -220,6 +286,15 @@ export function ExplorerScreen() {
       setOpenCanvasId(c.id);
       setSel(null);
     }
+  };
+
+  /** Le clic droit (v1.6.3) : OÙ qu'on clique, la création est là — sur une
+   *  carte (dans ce tableau / sur ce tableau), sur le fond (dans le niveau
+   *  visité). Le menu contextuel remplace la devinette « où est le bouton ? ». */
+  const openMenu = (e: ReactMouseEvent, target: Snapshot["canvases"][number] | null) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu({ x: e.clientX, y: e.clientY, target });
   };
 
   /** Le rechargement de données pour les gestes qui ne passent pas par `act` (les modales). */
@@ -394,7 +469,32 @@ export function ExplorerScreen() {
       </aside>
 
       {/* ═══════════ colonne 2 : dossiers OU canvas ═══════════ */}
-      <section className="min-w-0 flex-1 overflow-y-auto px-6 py-4">
+      {/* v1.6.3-bis : le FOND est un geste — clic droit = créer ICI, drop de
+          fichiers = déposer DANS le canvas ouvert (sinon le niveau visité,
+          sinon l'atelier). Le mensonge v1.6.3 (« Nouveau dossier ici » qui
+          créait à la racine quand on visitait un canvas) est mort. */}
+      <section
+        className="min-w-0 flex-1 overflow-y-auto px-6 py-4"
+        onContextMenu={(e) => openMenu(e, null)}
+        onDragOver={(e) => {
+          const id = open?.id ?? browseInId ?? atelierId;
+          if (id && [...e.dataTransfer.items].some((i) => i.kind === "file")) {
+            e.preventDefault();
+            setDropOn(id);
+          }
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropOn(null);
+        }}
+        onDrop={(e) => {
+          const id = open?.id ?? browseInId ?? atelierId;
+          if (e.dataTransfer.files.length > 0 && id) {
+            e.preventDefault();
+            setDropOn(null);
+            void uploadFiles(id, e.dataTransfer.files);
+          }
+        }}
+      >
         {open === null ? (
           <>
             <div className="mb-4 flex items-baseline gap-3">
@@ -426,22 +526,62 @@ export function ExplorerScreen() {
               </div>
             )}
             {notice && <p className="mb-3 rounded-md border border-border bg-muted/50 px-3 py-2 text-sm">{notice}</p>}
+            {(uploading > 0 || (dropOn !== null && dropOn === (browseInId ?? atelierId))) && (
+              <p className="mb-3 rounded-md border border-dashed border-primary/50 bg-primary/5 px-3 py-2 text-sm">
+                {uploading > 0 ? (
+                  <span className="flex items-center gap-2">
+                    <Loader2 className="size-4 animate-spin" /> Envoi de {uploading} fichier(s)…
+                  </span>
+                ) : (
+                  `Lâchez pour déposer dans « ${canvases.find((c) => c.id === (browseInId ?? atelierId))?.label ?? "Atelier"} » — ou visez une carte pour la déposer dedans.`
+                )}
+              </p>
+            )}
             <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
               {level.map((c) => (
                 <div
                   key={c.id}
-                  className="group relative cursor-pointer rounded-xl border border-border bg-card p-4 shadow-sm transition-shadow hover:shadow-md"
+                  className={`group relative cursor-pointer rounded-xl border bg-card p-4 shadow-sm transition-shadow hover:shadow-md ${
+                    dropOn === c.id ? "border-2 border-primary ring-2 ring-primary/30" : "border-border"
+                  }`}
                   onClick={() => openCard(c)}
+                  onContextMenu={(e) => openMenu(e, c)}
+                  /* Le glisser-déposer (v1.6.3) : un canvas reçoit les fichiers
+                     directement — le cercle « ouvrez le plein écran d'abord » est
+                     mort. Un dossier n'est pas une cible : c'est un conteneur de
+                     tableaux, pas une surface. */
+                  draggable={c.kind === "canvas"}
+                  onDragStart={(e) => e.dataTransfer.setData("application/x-canvas-id", c.id)}
+                  onDragOver={(e) => {
+                    if (c.kind !== "canvas") return;
+                    if ([...e.dataTransfer.items].some((i) => i.kind === "file")) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setDropOn(c.id);
+                    }
+                  }}
+                  onDragLeave={(e) => {
+                    if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropOn((d) => (d === c.id ? null : d));
+                  }}
+                  onDrop={(e) => {
+                    if (c.kind !== "canvas") return;
+                    if (e.dataTransfer.files.length > 0) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setDropOn(null);
+                      void uploadFiles(c.id, e.dataTransfer.files);
+                    }
+                  }}
                   title={
                     c.kind === "folder"
-                      ? "Cliquer : entrer dans le dossier"
-                      : "Cliquer : ouvrir le canvas"
+                      ? "Cliquer : entrer dans le dossier — clic droit : créer dedans"
+                      : "Cliquer : ouvrir le canvas — glissez des fichiers ici"
                   }
                 >
                   <div className="absolute right-2 top-2 hidden gap-0.5 group-hover:flex">
-                    {/* créer DEDANS : un dossier reçoit canvas et sous-dossiers ;
-                        un canvas ne reçoit rien (ce n'est pas un conteneur) */}
-                    {c.kind === "folder" && (
+                    {/* créer DEDANS : chaque carte l'offre (v1.6.3 — un canvas
+                        aussi range) ; le clic droit dit la même chose */}
+                    {c.kind === "folder" ? (
                       <>
                         <Button
                           size="icon"
@@ -468,6 +608,19 @@ export function ExplorerScreen() {
                           <Plus className="size-3.5" />
                         </Button>
                       </>
+                    ) : (
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="size-7 bg-card"
+                        title="Créer un sous-tableau dans ce canvas"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openNew("folder", c.id);
+                        }}
+                      >
+                        <FolderPlus className="size-3.5" />
+                      </Button>
                     )}
                     <Button
                       size="icon"
@@ -550,6 +703,13 @@ export function ExplorerScreen() {
                     {c.totals.conversations > 0 ? `${c.totals.conversations} conversation(s)` : "aucune conversation"}
                   </p>
                   <p className="mt-1 hidden text-[11px] text-muted-foreground group-hover:block">cliquer pour ouvrir ↵</p>
+                  {dropOn === c.id && (
+                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-xl bg-background/70">
+                      <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+                        <Upload className="size-4" /> Déposer dans « {c.label} »
+                      </span>
+                    </div>
+                  )}
                 </div>
               ))}
               {/* les DEUX créations du niveau visité (v1.6.2 : le cœur de la
@@ -610,6 +770,21 @@ export function ExplorerScreen() {
                 {open.totals.frames} frame(s) · {open.totals.constructions + open.totals.sources} objet(s) ·{" "}
                 {open.totals.conversations} conversation(s)
               </span>
+              {/* v1.6.3-bis : un canvas qui RANGE montre son contenu — « entrer »
+                  dedans affiche ses sous-tableaux (comme ouvrir un dossier) */}
+              {openChildCount > 0 && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setBrowseInId(open.id);
+                    setOpenCanvasId(null);
+                    setSel(null);
+                  }}
+                >
+                  <FolderOpen className="mr-1 size-4" /> Contenu ({openChildCount})
+                </Button>
+              )}
               <Button size="sm" variant="outline" className="ml-auto" asChild>
                 {/* AC2 : si une frame est sélectionnée, le focalisé centre dessus */}
                 <Link href={`/canvas/${open.id}${sel?.kind === "frame" ? `?frame=${sel.id}` : ""}`}>
@@ -645,6 +820,11 @@ export function ExplorerScreen() {
               selectedNodeId={sel?.kind === "node" ? sel.id : null}
               onSelect={(ref) => setSel({ kind: "node", id: ref })}
               onSelectFrame={(id) => setSel({ kind: "frame", id })}
+              /* v1.6.3 : déposer des fichiers sur le plan ouvert, sans passer par
+                 le plein écran — le canvas de l'explorateur reçoit aussi. */
+              setDropTarget={setDropOn}
+              isDropTarget={dropOn === open.id}
+              onFiles={(files) => void uploadFiles(open.id, files)}
             />
           </>
         )}
@@ -663,6 +843,78 @@ export function ExplorerScreen() {
           }}
         />
       </aside>
+
+      {/* ── le menu contextuel (v1.6.3) : créer canvas/dossier où l'on clique ── */}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          target={menu.target}
+          /* la vérité du menu de fond (v1.6.3-bis) : en vue plan, « ici » c'est
+             LE canvas ouvert — l'erreur signalée (« dans /Atelier, ça créait à
+             la racine ») venait de ce ciblage manquant */
+          hereLabel={open?.label}
+          targetChildCount={
+            menu.target ? canvases.filter((c) => c.parent_id === menu.target?.id).length : 0
+          }
+          onClose={() => setMenu(null)}
+          onNew={(kind, parentId) => {
+            setMenu(null);
+            // « ici » se résout dans l'ordre : sur une carte → son id ; en vue
+            // plan → le canvas ouvert ; dans un dossier visité → ce dossier ;
+            // à la racine → la racine. Jamais la racine par accident.
+            openNew(kind, parentId ?? open?.id ?? browseInId);
+          }}
+          onUpload={() => {
+            const t = menu.target;
+            setMenu(null);
+            if (t) {
+              setMenuUploadCanvasId(t.id);
+              fileInputRef.current?.click();
+            }
+          }}
+          onAction={(a) => {
+            const t = menu.target;
+            setMenu(null);
+            if (!t) return;
+            if (a === "open") openCard(t);
+            else if (a === "content") {
+              // entrer dans ce que la carte RANGE (v1.6.3-bis) — le même geste
+              // que « Contenu (n) » de la vue plan, depuis la grille
+              setBrowseInId(t.id);
+              setOpenCanvasId(null);
+              setSel(null);
+            }
+            else if (a === "rename") void rename(t.id, t.label);
+            else if (a === "move") setSel({ kind: "canvas", id: t.id });
+            else if (a === "pin") togglePin(t.id, t.pinned);
+            else if (a === "color") cycleColor(t.id, t.color);
+            else if (a === "delete")
+              void remove(
+                t.id,
+                t.label,
+                t.is_default,
+                t.totals.frames,
+                t.totals.conversations,
+                canvases.filter((x) => x.parent_id === t.id).length
+              );
+          }}
+        />
+      )}
+      {/* le champ caché du clic droit « Ajouter des fichiers » (un input file ne
+          s'ouvre QUE d'un geste utilisateur — l'entrée de menu préserve la chaîne) */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept=".md,.txt,.pdf,.markdown,.text"
+        className="hidden"
+        onChange={(e) => {
+          const files = e.target.files;
+          if (files && files.length > 0 && menuUploadCanvasId) void uploadFiles(menuUploadCanvasId, files);
+          e.target.value = "";
+        }}
+      />
 
       <NewCanvasModal
         open={newOpen}
@@ -721,6 +973,151 @@ export function ExplorerScreen() {
   );
 }
 
+/* ────────────────────────── le menu contextuel (v1.6.3) ───────────────────── */
+
+/**
+ * Le clic droit partout, finie la devinette (v1.6.3) : sur une carte canvas —
+ * ouvrir, ajouter des fichiers, déplacer, renommer… ; sur une carte dossier —
+ * créer canvas/sous-dossier DEDANS + les mêmes actions ; sur le fond — créer
+ * ici. Une entrée d'état dans l'écran, un clic ailleurs referme.
+ */
+function ContextMenu({
+  x,
+  y,
+  target,
+  hereLabel,
+  targetChildCount,
+  onClose,
+  onNew,
+  onUpload,
+  onAction,
+}: {
+  x: number;
+  y: number;
+  target: Snapshot["canvases"][number] | null;
+  /** Le nom du canvas ouvert en vue plan (v1.6.3-bis) : le menu du FOND ne doit
+   *  jamais mentir sur là où il crée — il le dit, et `onNew` le fait. */
+  hereLabel?: string;
+  /** Le nombre de sous-tableaux de la carte visée (v1.6.3-bis) : une carte qui
+   *  RANGE offre « Voir le contenu » — entrer dedans sans ouvrir son plan. */
+  targetChildCount?: number;
+  onClose: () => void;
+  onNew: (kind: "canvas" | "folder", parentId: string | null) => void;
+  onUpload: () => void;
+  onAction: (a: "open" | "content" | "rename" | "move" | "pin" | "color" | "delete") => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const close = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", esc);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", esc);
+    };
+  }, [onClose]);
+  /** Recadrage : le menu près du bord droit/bas reste entièrement visible. */
+  const W = 240;
+  const ITEM_H = 28;
+  const count = target ? (target.kind === "folder" ? 9 : 9) : 2;
+  const left = Math.min(x, window.innerWidth - W - 8);
+  const top = Math.min(y, window.innerHeight - count * ITEM_H - 24);
+  const item = "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm hover:bg-muted";
+  return (
+    <div ref={ref} className="fixed z-50 w-60 rounded-lg border border-border bg-card p-1 shadow-lg" style={{ left, top }} onContextMenu={(e) => e.preventDefault()}>
+      {target === null ? (
+        <>
+          <p className="px-2.5 pt-1.5 pb-1 text-[11px] uppercase tracking-wider text-muted-foreground">
+            {hereLabel ? `Créer dans « ${hereLabel} »` : "Créer ici"}
+          </p>
+          <button className={item} onClick={() => onNew("canvas", null)}>
+            <Presentation className="size-3.5" /> Nouveau canvas ici
+          </button>
+          <button className={item} onClick={() => onNew("folder", null)}>
+            <FolderPlus className="size-3.5" /> Nouveau dossier ici
+          </button>
+        </>
+      ) : target.kind === "folder" ? (
+        <>
+          <p className="px-2.5 pt-1.5 pb-1 text-[11px] uppercase tracking-wider text-muted-foreground">Dans « {target.label} »</p>
+          <button className={item} onClick={() => onNew("canvas", target.id)}>
+            <Presentation className="size-3.5" /> Nouveau canvas dedans
+          </button>
+          <button className={item} onClick={() => onNew("folder", target.id)}>
+            <FolderPlus className="size-3.5" /> Nouveau sous-dossier dedans
+          </button>
+          <div className="my-1 border-t border-border" />
+          <button className={item} onClick={() => onAction("open")}>
+            <FolderOpen className="size-3.5" /> Ouvrir le dossier
+          </button>
+          <button className={item} onClick={() => onAction("rename")}>
+            <Pencil className="size-3.5" /> Renommer
+          </button>
+          <button className={item} onClick={() => onAction("move")}>
+            <FolderInput className="size-3.5" /> Déplacer vers…
+          </button>
+          <button className={item} onClick={() => onAction("pin")}>
+            {target.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
+            {target.pinned ? "Désépingler" : "Épingler"}
+          </button>
+          <button className={item} onClick={() => onAction("color")}>
+            <span className={`size-3 rounded-sm ${canvasColorClass(target.color)}`} /> Étiquette suivante
+          </button>
+          {!target.is_default && (
+            <button className={`${item} text-destructive`} onClick={() => onAction("delete")}>
+              <Trash2 className="size-3.5" /> Supprimer
+            </button>
+          )}
+        </>
+      ) : (
+        <>
+          <p className="px-2.5 pt-1.5 pb-1 text-[11px] uppercase tracking-wider text-muted-foreground">Canvas « {target.label} »</p>
+          <button className={item} onClick={() => onAction("open")}>
+            <Presentation className="size-3.5" /> Ouvrir le canvas
+          </button>
+          <button className={item} onClick={onUpload}>
+            <Upload className="size-3.5" /> Ajouter des fichiers…
+          </button>
+          {/* v1.6.3 : un canvas aussi RANGE — sous-dossiers et sous-tableaux */}
+          <button className={item} onClick={() => onNew("folder", target.id)}>
+            <FolderPlus className="size-3.5" /> Nouveau sous-dossier dedans
+          </button>
+          <button className={item} onClick={() => onNew("canvas", target.id)}>
+            <Presentation className="size-3.5" /> Nouveau sous-canvas dedans
+          </button>
+          {(targetChildCount ?? 0) > 0 && (
+            <button className={item} onClick={() => onAction("content")}>
+              <FolderOpen className="size-3.5" /> Voir le contenu ({targetChildCount})
+            </button>
+          )}
+          <div className="my-1 border-t border-border" />
+          <button className={item} onClick={() => onAction("rename")}>
+            <Pencil className="size-3.5" /> Renommer
+          </button>
+          <button className={item} onClick={() => onAction("move")}>
+            <FolderInput className="size-3.5" /> Déplacer vers…
+          </button>
+          <button className={item} onClick={() => onAction("pin")}>
+            {target.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
+            {target.pinned ? "Désépingler" : "Épingler"}
+          </button>
+          <button className={item} onClick={() => onAction("color")}>
+            <span className={`size-3 rounded-sm ${canvasColorClass(target.color)}`} /> Étiquette suivante
+          </button>
+          {!target.is_default && (
+            <button className={`${item} text-destructive`} onClick={() => onAction("delete")}>
+              <Trash2 className="size-3.5" /> Supprimer
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 /* ────────────────────────── la vignette du plan (AC2) ────────────────────────── */
 
 function CanvasVignette({
@@ -728,12 +1125,19 @@ function CanvasVignette({
   selectedNodeId,
   onSelect,
   onSelectFrame,
+  setDropTarget,
+  isDropTarget,
+  onFiles,
 }: {
   canvas: Snapshot["canvases"][number];
   selectedNodeId: string | null;
   onSelect: (ref: string) => void;
   /** La maquette dit « frames cliquables » : un clic sur une frame l'affiche dans l'aperçu. */
   onSelectFrame: (id: string) => void;
+  /** v1.6.3 : le plan ouvert reçoit les fichiers déposés (même geste que le plein écran). */
+  setDropTarget: (id: string | null) => void;
+  isDropTarget: boolean;
+  onFiles: (files: FileList) => void;
 }) {
   const nodes = canvas.nodes;
   const bounds = useMemo(() => {
@@ -748,10 +1152,29 @@ function CanvasVignette({
 
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-card">
-      <div className="relative h-[480px] overflow-hidden" style={{
-        backgroundImage: "radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0)",
-        backgroundSize: "22px 22px",
-      }}>
+      <div
+        className={`relative h-[480px] overflow-hidden ${isDropTarget ? "outline-2 outline-dashed outline-primary" : ""}`}
+        style={{
+          backgroundImage: "radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0)",
+          backgroundSize: "22px 22px",
+        }}
+        onDragOver={(e) => {
+          if ([...e.dataTransfer.items].some((i) => i.kind === "file")) {
+            e.preventDefault();
+            setDropTarget(canvas.id);
+          }
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropTarget(null);
+        }}
+        onDrop={(e) => {
+          if (e.dataTransfer.files.length > 0) {
+            e.preventDefault();
+            setDropTarget(null);
+            onFiles(e.dataTransfer.files);
+          }
+        }}
+      >
         {canvas.frames.map((f) => (
           <button
             key={f.id}

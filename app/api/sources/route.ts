@@ -7,6 +7,7 @@ import { sha256Hex } from "@/lib/hash";
 import { createSourcesRepo } from "@/lib/repositories/sources";
 import { createJobsRepo, idempotencyKey } from "@/lib/repositories/jobs";
 import { createCanvasRepo } from "@/lib/repositories/canvas";
+import { ATELIER_CANVAS_ID, resolveCanvasTarget } from "@/lib/repositories/canvases";
 import { CHUNKER_VERSION } from "@/lib/ingest/chunker";
 import { normalizeText } from "@/lib/ingest/normalizer";
 import { extractPdfPages, parseTextBuffer } from "@/lib/ingest/parsers";
@@ -17,10 +18,12 @@ import { sanitizeSourceTitle } from "@/lib/ingest/title";
  * 201 {id, content_hash, ingest_status:"pending"} · 409 doublon · 422 PDF sans texte · 400 invalide.
  * La réponse est rapide : le travail (chunk/embed) se fait en job asynchrone (F1.5 AC2).
  *
- * Un fichier importé **apparaît immédiatement sur le canvas** (canvas-atelier) :
- * `canvas_x`/`canvas_y` (facultatifs, multipart) le posent là où il a été déposé,
- * sinon il prend la première place libre. Son ingestion déclenche ensuite la
- * découverte de ses liens (voir `ingest-service`).
+ * Un fichier importé **apparaît immédiatement sur le canvas** : `canvas_id`
+ * (facultatif, multipart) désigne le tableau cible — l'explorateur dépose dedans
+ * au glisser-déposer (v1.6.3) ; absent, la cible est l'atelier (le réceptacle
+ * historique). `canvas_x`/`canvas_y` (facultatifs) le posent là où il a été
+ * déposé, sinon il prend la première place libre. Son ingestion déclenche ensuite
+ * la découverte de ses liens (voir `ingest-service`).
  */
 export async function POST(req: NextRequest) {
   ensureDataDirs();
@@ -31,6 +34,24 @@ export async function POST(req: NextRequest) {
 
   if (contentType.includes("multipart/form-data")) {
     const form = await req.formData();
+    /* La cible du dépôt (v1.6.3) : résolue **avant toute écriture** — un id
+       inconnu ou un dossier (conteneur pur, garde v1.6.2) est un refus nommé
+       (404/400), jamais un fichier posé n'importe où puis une lecture cassée.
+       « string vide = absent » : l'écran qui n'a pas de cible n'envoie pas le champ. */
+    const rawCanvasId = form.get("canvas_id");
+    let targetCanvasId: string | undefined;
+    if (typeof rawCanvasId === "string" && rawCanvasId) {
+      const target = resolveCanvasTarget(db, rawCanvasId);
+      if (!target.ok) {
+        return target.reason === "not_found"
+          ? NextResponse.json({ code: "canvas_not_found", message: "tableau cible inconnu" }, { status: 404 })
+          : NextResponse.json(
+              { code: "canvas_est_dossier", message: `« ${target.row?.label ?? "?"} » est un dossier : on n'y dépose pas de fichier` },
+              { status: 400 }
+            );
+      }
+      targetCanvasId = rawCanvasId;
+    }
     const type = form.get("type");
     const file = form.get("file");
     if (type !== "TEXT" && type !== "PDF") {
@@ -65,7 +86,7 @@ export async function POST(req: NextRequest) {
         raw_content: rawContent,
         content_hash: contentHash,
       });
-      placeOnCanvas(db, id, dropPosition);
+      placeOnCanvas(db, id, dropPosition, targetCanvasId);
       enqueueIngest(jobs, id, contentHash, {});
       return NextResponse.json({ id, content_hash: contentHash, ingest_status: "pending" }, { status: 201 });
     }
@@ -110,7 +131,7 @@ export async function POST(req: NextRequest) {
       raw_content: rawContent,
       content_hash: contentHash,
     });
-    placeOnCanvas(db, id, dropPosition);
+    placeOnCanvas(db, id, dropPosition, targetCanvasId);
     enqueueIngest(jobs, id, contentHash, { page_map: pageMap });
     return NextResponse.json({ id, content_hash: contentHash, ingest_status: "pending" }, { status: 201 });
   }
@@ -168,9 +189,12 @@ export async function GET() {
  * Poser le fichier sur le canvas. Sans coordonnées, c'est la première place libre ;
  * avec elles, l'endroit exact du dépôt — l'utilisateur retrouve son fichier là où il
  * l'a lâché, ce qui est tout l'intérêt d'un plan de travail.
+ * `canvasId` (v1.6.3) : la cible explicite de l'explorateur — déjà validée par
+ * `resolveCanvasTarget` (existe, et n'est pas un dossier) avant tout appel ici ;
+ * absent, l'atelier reste le réceptacle (comportement historique).
  */
-function placeOnCanvas(db: ReturnType<typeof getDb>, id: string, pos: { x: number; y: number } | null): void {
-  const canvas = createCanvasRepo(db);
+function placeOnCanvas(db: ReturnType<typeof getDb>, id: string, pos: { x: number; y: number } | null, canvasId?: string): void {
+  const canvas = createCanvasRepo(db, canvasId ?? ATELIER_CANVAS_ID);
   if (pos) canvas.placeAt("source", id, pos.x, pos.y);
   else canvas.place("source", id);
 }

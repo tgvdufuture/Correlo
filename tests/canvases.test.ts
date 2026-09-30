@@ -4,6 +4,7 @@ import {
   ATELIER_CANVAS_ID,
   createCanvasesRepo,
   recentCanvasIds,
+  resolveCanvasTarget,
   type CanvasRow,
 } from "@/lib/repositories/canvases";
 import { createCanvasRepo } from "@/lib/repositories/canvas";
@@ -281,20 +282,30 @@ describe("la distinction dossier / canvas (v1.6.2, migration 013)", () => {
     expect(repo.create({ label: "Sans nature" }).kind).toBe("canvas");
   });
 
-  it("un dossier ne peut pas vivre sous un canvas (ce qui se range va dans un conteneur)", () => {
+  it("un dossier vit sous un canvas (v1.6.3 — chaque tableau range, l'atelier compris)", () => {
     const { db } = makeTestDb();
     const repo = createCanvasesRepo(db);
+    // le signalement v1.6.2 : créer un dossier « dans l'atelier » (un canvas)
+    // le repoussait à la racine — la règle est levée, le parent est honoré
     const cv = repo.create({ label: "Une surface" });
-    expect(() => repo.create({ label: "Dossier égaré", parentId: cv.id, kind: "folder" })).toThrow(
-      /folder_sous_canvas/
-    );
-    // et par déplacement non plus
+    const inside = repo.create({ label: "Dossier dans le canvas", parentId: cv.id, kind: "folder" });
+    expect(inside.parent_id).toBe(cv.id);
+    // et par déplacement : le dossier rejoint le canvas
     const folder = repo.create({ label: "Dossier racine", kind: "folder" });
-    expect(repo.setParent(folder.id, cv.id)).toEqual({ ok: false, reason: "folder_sous_canvas" });
-    // un canvas, lui, se range dans un dossier sans problèmes
-    const folder2 = repo.create({ label: "Conteneur", kind: "folder" });
-    const moved = repo.setParent(cv.id, folder2.id);
+    const moved = repo.setParent(folder.id, cv.id);
     expect(moved.ok).toBe(true);
+    if (moved.ok) expect(moved.row.parent_id).toBe(cv.id);
+  });
+
+  it("un canvas vit sous un canvas, y compris sous l'atelier", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const atelier = repo.getAtelier();
+    const child = repo.create({ label: "Sous-tableau de l'atelier", parentId: atelier.id });
+    expect(child.parent_id).toBe(ATELIER_CANVAS_ID);
+    const cv = repo.create({ label: "Une surface" });
+    const grandchild = repo.create({ label: "Sous-surface", parentId: cv.id });
+    expect(grandchild.parent_id).toBe(cv.id);
   });
 
   it("un dossier est un conteneur pur : ni frame, ni item, ni conversation", () => {
@@ -699,5 +710,44 @@ describe("l'atelier focalisé — le dépôt scopé par tableau (v1.6 §14.2, é
     });
     expect(canvas.getState().frames.map((f) => f.id)).toEqual([frame.id]);
     expect(canvas.getState().items.map((i) => i.ref)).toEqual([id]);
+  });
+});
+
+describe("resolveCanvasTarget — la cible d'un dépôt de fichier (v1.6.3)", () => {
+  it("un canvas existant est une cible valide (la ligne est résolue)", () => {
+    const { db } = makeTestDb();
+    const atelier = createCanvasesRepo(db).getAtelier();
+    const hit = resolveCanvasTarget(db, atelier.id);
+    expect(hit.ok).toBe(true);
+    if (hit.ok) expect(hit.row.id).toBe(ATELIER_CANVAS_ID);
+  });
+
+  it("un id inconnu est refusé nommément (not_found — pas un 500 de FK plus tard)", () => {
+    const { db } = makeTestDb();
+    const miss = resolveCanvasTarget(db, "canvas-fantome");
+    expect(miss).toEqual({ ok: false, reason: "not_found" });
+  });
+
+  it("un dossier n'est PAS une cible : on n'y dépose pas de fichier (est_un_dossier)", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const folder = repo.create({ label: "Classeur", kind: "folder" });
+    const refused = resolveCanvasTarget(db, folder.id);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.reason).toBe("est_un_dossier");
+      // la ligne accompagne le refus : l'écran peut NOMMER le dossier fautif
+      expect(refused.row?.label).toBe("Classeur");
+    }
+  });
+
+  it("la règle tient pour un dossier imbriqué (sous-dossier d'un dossier)", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const parent = repo.create({ label: "Parent", kind: "folder" });
+    const child = repo.create({ label: "Enfant", kind: "folder", parentId: parent.id });
+    const refused = resolveCanvasTarget(db, child.id);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.reason).toBe("est_un_dossier");
   });
 });

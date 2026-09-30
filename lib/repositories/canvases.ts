@@ -33,7 +33,7 @@ export const MAX_CANVAS_LABEL = 120;
  */
 export type SetParentFailure = {
   ok: false;
-  reason: "cycle" | "atelier" | "not_found" | "parent_not_found" | "folder_sous_canvas";
+  reason: "cycle" | "atelier" | "not_found" | "parent_not_found";
 };
 
 /** Vrai si `candidate` est `ancestorId` ou vit sous lui (profondeur libre). */
@@ -95,7 +95,6 @@ export type CanvasKind = (typeof CANVAS_KINDS)[number];
 
 /** Le suffixe des refus de garde dossiers/canvases (`erreur_canvas_dans_dossier`…). */
 export type FolderGuardReason =
-  | "folder_sous_canvas"
   | "frame_dans_dossier"
   | "item_dans_dossier"
   | "conversation_dans_dossier";
@@ -150,10 +149,8 @@ export interface CanvasesRepo {
   /**
    * Le seul patch qui peut **échouer nommément** : déplacer un tableau sous l'un
    * de ses descendants ferait un cycle (`reason: 'cycle'`), déplacer l'atelier le
-   * ferait perdre sa place de réceptacle racine (`reason: 'atelier'`), déplacer
-   * quoi que ce soit **sous un canvas** déposerait un conteneur dans une surface
-   * (`reason: 'folder_sous_canvas'`), et un id ou un parent inconnu est nommé
-   * (`not_found` / `parent_not_found`).
+   * ferait perdre sa place de réceptacle racine (`reason: 'atelier'`), et un id
+   * ou un parent inconnu est nommé (`not_found` / `parent_not_found`).
    */
   setParent(id: string, parentId: string | null): { ok: true; row: CanvasRow } | SetParentFailure;
   update(id: string, patch: CanvasPatch): CanvasRow | null;
@@ -197,6 +194,25 @@ export function recentCanvasIds(db: Db, limit = 8): string[] {
   return rows.map((r) => r.id);
 }
 
+/**
+ * La cible d'un dépôt d'objet sur un canvas (v1.6.2-bis) : un id de tableau ne
+ * vaut que s'il existe **et** est un canvas — un dossier est un conteneur pur,
+ * on n'y dépose pas de fichier. La règle vit **ici** pour que la route d'import
+ * et le dépôt du canvas ne puissent pas diverger sur ce qu'est une cible valide.
+ *
+ * Renvoie la ligne résolue, ou **la raison nommée du refus** — jamais un silence :
+ *  - `not_found` : l'id ne désigne aucun tableau (la FK de `canvas_items`
+ *    casserait plus tard, à la lecture — mieux vaut le refus nommé à l'écoute) ;
+ *  - `est_un_dossier` : déposer un fichier dans un conteneur n'a pas de sens
+ *    (la ligne du dossier accompagne le refus, pour que l'écran puisse le nommer).
+ */
+export function resolveCanvasTarget(db: Db, canvasId: string): { ok: true; row: CanvasRow } | { ok: false; reason: "not_found" | "est_un_dossier"; row?: CanvasRow } {
+  const row = (db.prepare("SELECT * FROM canvases WHERE id = ?").get(canvasId) as CanvasRow | undefined);
+  if (!row) return { ok: false, reason: "not_found" };
+  if (row.kind === "folder") return { ok: false, reason: "est_un_dossier", row };
+  return { ok: true, row };
+}
+
 export function createCanvasesRepo(db: Db): CanvasesRepo {
   /** L'atelier existe par la migration ; recréé ici s'il manque (base antérieure). */
   const ensureAtelier = (): CanvasRow => {
@@ -236,17 +252,14 @@ export function createCanvasesRepo(db: Db): CanvasesRepo {
         throw new Error(`canvases : label trop long (max ${MAX_CANVAS_LABEL})`);
       }
       const kind: CanvasKind = c.kind ?? "canvas";
-      // **Ce qui se range va dans un conteneur** : un dossier ne vit jamais sous
-      // un canvas (v1.6.2) — et un parent inconnu est une erreur nommée, pas un
-      // 500 de FK. Un canvas, lui, se crée à la racine ou dans un dossier.
+      // Le parent doit exister (refus nommé, pas un 500 de FK). **Toute nature
+      // peut y vivre** (v1.6.3) : un canvas et un dossier rangent tous les deux
+      // — l'atelier lui-même reçoit ses sous-tableaux.
       if (c.parentId) {
-        const parent = db.prepare("SELECT id, kind FROM canvases WHERE id = ?").get(c.parentId) as
-          | { id: string; kind: CanvasKind }
+        const parent = db.prepare("SELECT id FROM canvases WHERE id = ?").get(c.parentId) as
+          | { id: string }
           | undefined;
         if (!parent) throw new Error("canvases : parent inconnu");
-        if (kind === "folder" && parent.kind !== "folder") {
-          throw new Error("canvases : un dossier ne peut pas vivre sous un canvas (folder_sous_canvas)");
-        }
       }
       const now = nowIso();
       const id = randomUUID();
@@ -267,15 +280,10 @@ export function createCanvasesRepo(db: Db): CanvasesRepo {
       // unique de la 010 qui interdit un second atelier)
       if (canvas.is_default === 1 && parentId !== null) return { ok: false, reason: "atelier" };
       if (parentId !== null) {
-        const parent = db.prepare("SELECT id, kind FROM canvases WHERE id = ?").get(parentId) as
-          | { id: string; kind: CanvasKind }
+        const parent = db.prepare("SELECT id FROM canvases WHERE id = ?").get(parentId) as
+          | { id: string }
           | undefined;
         if (!parent) return { ok: false, reason: "parent_not_found" };
-        // **ce qui se range va dans un conteneur** : un dossier sous un canvas
-        // déposerait un conteneur dans une surface — refus nommé (v1.6.2)
-        if (canvas.kind === "folder" && parent.kind !== "folder") {
-          return { ok: false, reason: "folder_sous_canvas" };
-        }
         // un tableau ne peut pas vivre sous lui-même ni sous l'un de ses
         // descendants : le graphe resterait un arbre, jamais un cycle
         if (parentId === id || isWithinSubtree(db, parentId, id)) {
