@@ -1,7 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { getDb } from "@/lib/db/client";
-import { CANVAS_COLORS, MAX_CANVAS_LABEL, createCanvasesRepo } from "@/lib/repositories/canvases";
+import {
+  CANVAS_COLORS,
+  CANVAS_KINDS,
+  MAX_CANVAS_LABEL,
+  createCanvasesRepo,
+} from "@/lib/repositories/canvases";
 
 /**
  * Les tableaux (v1.6 §14, étape 2) — le CRUD que l'explorateur propose, ici en
@@ -24,12 +29,18 @@ const createSchema = z.object({
   label: z.string().trim().min(1).max(MAX_CANVAS_LABEL),
   color: colorSchema.optional(),
   pinned: z.boolean().optional(),
+  /** La nature (v1.6.2) : surface de travail (`canvas`) ou conteneur (`folder`). */
+  kind: z.enum(CANVAS_KINDS).optional(),
+  /** Créer directement sous un dossier (le « + » de l'arbre) ; absent = racine. */
+  parentId: z.string().optional(),
 });
 
 const patchSchema = z.object({
   label: z.string().trim().min(1).max(MAX_CANVAS_LABEL).optional(),
   color: colorSchema.optional(),
   pinned: z.boolean().optional(),
+  /** Déplacer (v1.6.1) : un id de tableau, ou null pour remonter à la racine. */
+  parentId: z.union([z.string(), z.null()]).optional(),
 });
 
 const reorderSchema = z.object({ ids: z.array(z.string()) });
@@ -43,7 +54,10 @@ export async function POST(req: NextRequest) {
     const row = createCanvasesRepo(getDb()).create(parsed.data);
     return NextResponse.json(row, { status: 201 });
   } catch (e) {
-    return NextResponse.json({ error: (e as Error).message }, { status: 400 });
+    const message = (e as Error).message;
+    // les refus nommés du dépôt (parent inconnu) sont des 400 avec leur raison,
+    // pas des 500 — même contrat que le reste de la route
+    return NextResponse.json({ error: message }, { status: 400 });
   }
 }
 
@@ -64,7 +78,23 @@ export async function PATCH(req: NextRequest) {
   if (!parsed.success) {
     return NextResponse.json({ error: "invalid_body", detail: parsed.error.issues }, { status: 400 });
   }
-  const row = createCanvasesRepo(getDb()).update(id, parsed.data);
+  const repo = createCanvasesRepo(getDb());
+  // le déplacement est le seul patch qui peut refuser **nommément** (cycle,
+  // atelier) : il passe par setParent, et sa raison traverse en 400/403 —
+  // l'écran peut dire « ce déplacement ferait un cycle » au lieu d'un 500
+  if (parsed.data.parentId !== undefined) {
+    const moved = repo.setParent(id, parsed.data.parentId);
+    if (!moved.ok) {
+      return NextResponse.json(
+        { error: moved.reason },
+        { status: moved.reason === "atelier" ? 403 : moved.reason === "not_found" ? 404 : 400 }
+      );
+    }
+    const rest = { ...parsed.data };
+    delete rest.parentId;
+    if (Object.keys(rest).length === 0) return NextResponse.json(moved.row);
+  }
+  const row = repo.update(id, parsed.data);
   if (!row) return NextResponse.json({ error: "not_found" }, { status: 404 });
   return NextResponse.json(row);
 }
@@ -79,7 +109,8 @@ export async function DELETE(req: NextRequest) {
       { status: result.reason === "atelier" ? 403 : 404 }
     );
   }
-  // le détachement est **dit** : l'écran annonce ce qui survit (frames dissoutes,
-  // conversations déliées) au lieu de laisser un silence après un geste lourd
+  // le détachement est **dit** : l'écran annonce ce qui survit (sous-tableaux
+  // remontés, frames dissoutes, conversations déliées) au lieu de laisser un
+  // silence après un geste lourd
   return NextResponse.json(result);
 }

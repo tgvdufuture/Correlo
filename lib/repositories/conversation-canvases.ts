@@ -1,4 +1,5 @@
 import { nowIso, type Db } from "@/lib/db/client";
+import { ensureNotFolder } from "@/lib/repositories/canvases";
 
 /**
  * Multi-ancrage des conversations (v1.6 §14.3, migration 010).
@@ -58,6 +59,9 @@ export function createConversationCanvasRepo(db: Db): ConversationCanvasRepo {
       if (!conv) throw new Error(`conversation_canvases : conversation inconnue (${conversationId})`);
       const cv = db.prepare("SELECT 1 FROM canvases WHERE id = ?").get(canvasId);
       if (!cv) throw new Error(`conversation_canvases : tableau inconnu (${canvasId})`);
+      // une conversation s'ancre sur une **surface de travail** — un dossier n'a
+      // rien à discuter (il ne porte aucun objet) ; garde partagée, jamais dupliquée
+      ensureNotFolder(db, canvasId, "conversation");
       const res = db
         .prepare(
           `INSERT OR IGNORE INTO conversation_canvases (conversation_id, canvas_id, created_at)

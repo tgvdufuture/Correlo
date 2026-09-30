@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { nowIso, type Db } from "@/lib/db/client";
-import { ATELIER_CANVAS_ID } from "@/lib/repositories/canvases";
+import { ATELIER_CANVAS_ID, ensureNotFolder } from "@/lib/repositories/canvases";
 import {
   decodeConstruction,
   type ConstructionRow,
@@ -146,6 +146,13 @@ const MARGIN = 60;
 const NEXT_Z = `COALESCE((SELECT MAX(z) FROM canvas_items), 0) + 1`;
 
 export function createCanvasRepo(db: Db, canvasId: string = ATELIER_CANVAS_ID): CanvasRepo {
+  // **Un dossier est un conteneur pur** (v1.6.2, migration 013) : le dépôt scopé
+  // sur un dossier ne peut ni lire un plan (il n'y en a pas) ni en écrire. La garde
+  // est posée à la construction : chaque méthode hérite du refus nommé.
+  // NB : on ne vérifie PAS ici que le canvas existe — le défaut historique
+  // (`canvas-atelier` recréé par `ensureAtelier` si absent) en dépend.
+  ensureNotFolder(db, canvasId, "frame");
+  ensureNotFolder(db, canvasId, "item");
   const sourcesRepo = createSourcesRepo(db);
   /**
    * Le canvas que **cet** écran sert. L'atelier garde le défaut (appel sans

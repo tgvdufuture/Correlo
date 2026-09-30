@@ -4,6 +4,7 @@ import {
   ATELIER_CANVAS_ID,
   createCanvasesRepo,
   recentCanvasIds,
+  type CanvasRow,
 } from "@/lib/repositories/canvases";
 import { createCanvasRepo } from "@/lib/repositories/canvas";
 import { createConversationCanvasRepo } from "@/lib/repositories/conversation-canvases";
@@ -119,7 +120,7 @@ describe("dépôt canvases — la collection", () => {
     expect(repo.deleteById(ATELIER_CANVAS_ID)).toEqual({ ok: false, reason: "atelier" });
 
     const result = repo.deleteById(cv.id);
-    expect(result).toEqual({ ok: true, detached: { frames: 1, conversations: 0 } });
+    expect(result).toEqual({ ok: true, detached: { frames: 1, conversations: 0, children: 0 } });
 
     // le canvas est parti
     expect(repo.getById(cv.id)).toBeNull();
@@ -173,6 +174,173 @@ describe("dépôt canvases — la collection", () => {
     // la conversation est plus récente que le canvas : elle le fait remonter
     const recent = recentCanvasIds(db, 5);
     expect(recent[0]).toBe(cv.id);
+  });
+});
+
+describe("l'imbrication — les sous-tableaux (v1.6.1, migration 012)", () => {
+  it("créer sous un parent, déplacer, remettre à la racine (persistant)", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const parent = repo.create({ label: "Veille" });
+    const child = repo.create({ label: "Papiers", parentId: parent.id });
+    expect(child.parent_id).toBe(parent.id);
+
+    // un déplacement par le patch dédié (l'API passe ici)
+    const moved = repo.setParent(child.id, ATELIER_CANVAS_ID);
+    expect(moved.ok).toBe(true);
+    expect((moved as { row: CanvasRow }).row.parent_id).toBe(ATELIER_CANVAS_ID);
+
+    // retour à la racine : parent NULL
+    const root = repo.setParent(child.id, null);
+    expect(root.ok).toBe(true);
+    expect((root as { row: CanvasRow }).row.parent_id).toBeNull();
+  });
+
+  it("un parent inconnu est une erreur nommée, pas un silence", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const cv = repo.create({ label: "A" });
+    expect(repo.setParent(cv.id, "canvas-inconnu")).toEqual({ ok: false, reason: "parent_not_found" });
+    expect(() => repo.create({ label: "B", parentId: "canvas-inconnu" })).toThrow();
+  });
+
+  it("un cycle est impossible : sous soi, sous un descendant, profondeur libre sinon", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const a = repo.create({ label: "A" });
+    const b = repo.create({ label: "B", parentId: a.id });
+    const c = repo.create({ label: "C", parentId: b.id });
+    // l'arbre accepte la profondeur libre (A → B → C)…
+    expect(repo.getById(c.id)!.parent_id).toBe(b.id);
+    // …mais jamais un cycle : C ne peut pas adopter son grand-parent A
+    expect(repo.setParent(a.id, c.id)).toEqual({ ok: false, reason: "cycle" });
+    expect(repo.setParent(a.id, a.id)).toEqual({ ok: false, reason: "cycle" });
+    // B non plus (descendant direct) — et rien n'a bougé
+    expect(repo.setParent(a.id, b.id)).toEqual({ ok: false, reason: "cycle" });
+    expect(repo.getById(a.id)!.parent_id).toBeNull();
+  });
+
+  it("l'atelier ne peut pas être déplacé sous un tableau (réceptacle racine)", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const parent = repo.create({ label: "Conteneur" });
+    expect(repo.setParent(ATELIER_CANVAS_ID, parent.id)).toEqual({ ok: false, reason: "atelier" });
+    // mais il reste une racine parfaitement ordinaire pour ses propres enfants
+    const child = repo.create({ label: "Sous-atelier", parentId: ATELIER_CANVAS_ID });
+    expect(child.parent_id).toBe(ATELIER_CANVAS_ID);
+  });
+
+  it("supprimer un tableau fait remonter ses sous-tableaux au grand-parent", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const grandParent = repo.create({ label: "Veille" });
+    const mid = repo.create({ label: "2026", parentId: grandParent.id });
+    const child1 = repo.create({ label: "Papiers", parentId: mid.id });
+    const child2 = repo.create({ label: "Modèles", parentId: mid.id });
+
+    const result = repo.deleteById(mid.id);
+    expect(result).toEqual({ ok: true, detached: { frames: 0, conversations: 0, children: 2 } });
+    expect(repo.getById(mid.id)).toBeNull();
+    // les enfants sont visibles là où leur parent était : sous le grand-parent
+    expect(repo.getById(child1.id)!.parent_id).toBe(grandParent.id);
+    expect(repo.getById(child2.id)!.parent_id).toBe(grandParent.id);
+
+    // supprimer un tableau **racine** : ses enfants redeviennent racines
+    const rootChild = repo.create({ label: "Orphelin de racine", parentId: grandParent.id });
+    repo.deleteById(grandParent.id);
+    expect(repo.getById(rootChild.id)!.parent_id).toBeNull();
+  });
+
+  it("la suppression d'un parent n'est pas possible sans traiter ses enfants (FK RESTRICT)", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const parent = repo.create({ label: "Père" });
+    repo.create({ label: "Fils", parentId: parent.id });
+    // `deleteById` remonte les enfants AVANT le DELETE : la FK ne peut jamais
+    // crier — mais une écriture brute (le côté qui ne passe pas par le dépôt)
+    // est bien refusée par RESTRICT
+    expect(() =>
+      db.prepare("DELETE FROM canvases WHERE id = ?").run(parent.id)
+    ).toThrow();
+    expect(repo.getById(parent.id)).not.toBeNull();
+  });
+});
+
+describe("la distinction dossier / canvas (v1.6.2, migration 013)", () => {
+  it("un dossier se crée, se range dans un dossier, et côte à côte avec des canvas", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const folder = repo.create({ label: "Veille", kind: "folder" });
+    expect(folder.kind).toBe("folder");
+    // dans un dossier : un canvas ET un sous-dossier, mélangés (le cœur de la demande)
+    const cv = repo.create({ label: "Papiers", parentId: folder.id, kind: "canvas" });
+    const sub = repo.create({ label: "Archives", parentId: folder.id, kind: "folder" });
+    expect(cv.kind).toBe("canvas");
+    expect(sub.parent_id).toBe(folder.id);
+    // le défaut reste « canvas » (l'usage majoritaire)
+    expect(repo.create({ label: "Sans nature" }).kind).toBe("canvas");
+  });
+
+  it("un dossier ne peut pas vivre sous un canvas (ce qui se range va dans un conteneur)", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const cv = repo.create({ label: "Une surface" });
+    expect(() => repo.create({ label: "Dossier égaré", parentId: cv.id, kind: "folder" })).toThrow(
+      /folder_sous_canvas/
+    );
+    // et par déplacement non plus
+    const folder = repo.create({ label: "Dossier racine", kind: "folder" });
+    expect(repo.setParent(folder.id, cv.id)).toEqual({ ok: false, reason: "folder_sous_canvas" });
+    // un canvas, lui, se range dans un dossier sans problèmes
+    const folder2 = repo.create({ label: "Conteneur", kind: "folder" });
+    const moved = repo.setParent(cv.id, folder2.id);
+    expect(moved.ok).toBe(true);
+  });
+
+  it("un dossier est un conteneur pur : ni frame, ni item, ni conversation", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const folder = repo.create({ label: "Conteneur", kind: "folder" });
+    // le dépôt du canvas scopé sur un dossier est refusé dès la construction
+    expect(() => createCanvasRepo(db, folder.id)).toThrow(/frame_dans_dossier|item_dans_dossier/);
+    // les liaisons de conversations aussi (garde partagée, jamais dupliquée)
+    const conv = makeConversation(db, "Une question");
+    expect(() => createConversationCanvasRepo(db).link(conv, folder.id)).toThrow(
+      /conversation_dans_dossier/
+    );
+  });
+
+  it("le snapshot montre un dossier vide de plan et le contenu mixte reste lisible", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const folder = repo.create({ label: "Veille", kind: "folder" });
+    repo.create({ label: "Papiers", parentId: folder.id, kind: "canvas" });
+    const snap = createExplorerService(db).snapshot();
+    const folderSummary = snap.canvases.find((c) => c.id === folder.id)!;
+    expect(folderSummary.kind).toBe("folder");
+    // conteneur pur : aucun plan, aucune conversation (les gardes garantissent
+    // qu'il n'y en a pas — le service n'assemble pas ce qui ne peut pas exister)
+    expect(folderSummary.frames).toEqual([]);
+    expect(folderSummary.conversations).toEqual([]);
+    expect(folderSummary.totals).toEqual({ frames: 0, constructions: 0, sources: 0, conversations: 0 });
+    // le canvas enfant reste une surface ordinaire
+    const child = snap.canvases.find((c) => c.label === "Papiers")!;
+    expect(child.kind).toBe("canvas");
+    expect(child.parent_id).toBe(folder.id);
+  });
+
+  it("supprimer un dossier fait remonter canvas ET sous-dossiers mêlés", () => {
+    const { db } = makeTestDb();
+    const repo = createCanvasesRepo(db);
+    const root = repo.create({ label: "Racine de check", kind: "folder" });
+    const mid = repo.create({ label: "2026", parentId: root.id, kind: "folder" });
+    const cv = repo.create({ label: "Canvas dedans", parentId: mid.id, kind: "canvas" });
+    const sub = repo.create({ label: "Dossier dedans", parentId: mid.id, kind: "folder" });
+    const result = repo.deleteById(mid.id);
+    expect(result).toEqual({ ok: true, detached: { frames: 0, conversations: 0, children: 2 } });
+    // les deux natures remontent au même endroit
+    expect(repo.getById(cv.id)!.parent_id).toBe(root.id);
+    expect(repo.getById(sub.id)!.parent_id).toBe(root.id);
   });
 });
 

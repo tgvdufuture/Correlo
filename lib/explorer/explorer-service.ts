@@ -2,6 +2,7 @@ import type { Db } from "@/lib/db/client";
 import {
   createCanvasesRepo,
   recentCanvasIds,
+  type CanvasKind,
   type CanvasRow,
 } from "@/lib/repositories/canvases";
 import type { CanvasFrameKind } from "@/lib/repositories/canvas";
@@ -91,6 +92,10 @@ export interface ExplorerCanvasSummary {
   is_default: boolean;
   pinned: boolean;
   position: number;
+  /** Le dossier qui contient celui-ci (v1.6.1, migration 012) — null = racine. */
+  parent_id: string | null;
+  /** La nature (v1.6.2, migration 013) : surface de travail ou conteneur. */
+  kind: CanvasKind;
   updated_at: string;
   frames: ExplorerFrameSummary[];
   /** Items posés hors frame — ils appartiennent à l'atelier (le réceptacle). */
@@ -357,9 +362,14 @@ export function createExplorerService(db: Db) {
 
       // ── assemblage ──────────────────────────────────────────────────────
       const canvases: ExplorerCanvasSummary[] = rows.map((r: CanvasRow) => {
-        const frames = framesByCanvas.get(r.id) ?? [];
-        const unframed = r.id === atelier.id ? (unframedByCanvas.get(r.id) ?? { constructions: 0, sources: 0 }) : { constructions: 0, sources: 0 };
-        const conversations = convsByCanvas.get(r.id) ?? [];
+        // **Un dossier est un conteneur pur** (v1.6.2) : il n'a ni plan, ni items,
+        // ni conversations — il ne montre que ce qu'il range (ses enfants, lus par
+        // l'écran dans le même snapshot). Les gardes d'écriture garantissent qu'il
+        // n'a RIEN : on n'assemble pas ce qui ne peut pas exister.
+        const isFolder = r.kind === "folder";
+        const frames = isFolder ? [] : (framesByCanvas.get(r.id) ?? []);
+        const unframed = !isFolder && r.id === atelier.id ? (unframedByCanvas.get(r.id) ?? { constructions: 0, sources: 0 }) : { constructions: 0, sources: 0 };
+        const conversations = isFolder ? [] : (convsByCanvas.get(r.id) ?? []);
         const fromFrames = frames.reduce(
           (acc, f) => ({
             constructions: acc.constructions + f.constructions,
@@ -374,6 +384,8 @@ export function createExplorerService(db: Db) {
           is_default: r.is_default === 1,
           pinned: r.pinned === 1,
           position: r.position,
+          parent_id: r.parent_id,
+          kind: r.kind,
           updated_at: r.updated_at,
           frames,
           unframed,

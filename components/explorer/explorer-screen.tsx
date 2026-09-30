@@ -5,14 +5,19 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
+  CornerUpLeft,
   FileText,
   Folder,
+  FolderInput,
+  FolderOpen,
+  FolderPlus,
   Loader2,
   MessageSquare,
   Pencil,
   Pin,
   PinOff,
   Plus,
+  Presentation,
   RefreshCw,
   Search,
   Sparkles,
@@ -63,11 +68,19 @@ export function ExplorerScreen() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  // la vue : la grille des dossiers, ou l'intérieur d'un tableau
+  // la vue : la grille des dossiers (d'un niveau de l'arbre), ou l'intérieur d'un tableau
   const [openCanvasId, setOpenCanvasId] = useState<string | null>(null);
+  // le niveau de l'arbre affiché dans la grille (v1.6.1 : les sous-tableaux) —
+  // `null` = racine ; un id = on regarde **dans** ce tableau
+  const [browseInId, setBrowseInId] = useState<string | null>(null);
   // l'objet sélectionné (aperçu) : une construction, une frame, une conversation…
   const [sel, setSel] = useState<{ kind: "node" | "frame" | "canvas" | "conversation"; id: string } | null>(null);
   const [newOpen, setNewOpen] = useState(false);
+  // la nature à créer dans la modale (« canvas » ou « dossier » — v1.6.2)
+  const [newKind, setNewKind] = useState<"canvas" | "folder">("canvas");
+  // le dossier **dans** lequel la modale de création posera le nouveau (le « + »
+  // d'une carte, ou le niveau visité) — null = à la racine
+  const [newParentId, setNewParentId] = useState<string | null>(null);
   const [convOpen, setConvOpen] = useState(false);
   const [convTarget, setConvTarget] = useState<string | null>(null);
 
@@ -99,6 +112,47 @@ export function ExplorerScreen() {
   const canvases = useMemo(() => snap?.canvases ?? [], [snap]);
   const open = openCanvasId ? canvases.find((c) => c.id === openCanvasId) ?? null : null;
   const pinned = canvases.filter((c) => c.pinned);
+  /**
+   * Le niveau affiché (v1.6.2 : les dossiers) : les enfants du dossier visité —
+   * **sous-dossiers et canvas mélangés**, comme un explorateur de fichiers — ou
+   * les racines. Le tri met les dossiers d'abord (convention universelle).
+   */
+  const level = useMemo(() => {
+    const children = canvases.filter((c) => (browseInId ? c.parent_id === browseInId : !c.parent_id));
+    return [...children].sort((a, b) =>
+      a.kind === b.kind ? 0 : a.kind === "folder" ? -1 : 1
+    );
+  }, [canvases, browseInId]);
+  const browseIn = browseInId ? canvases.find((c) => c.id === browseInId) ?? null : null;
+  /** Le chemin de « Entrer » (le fil d'Ariane de la grille), racine d'abord. */
+  const browseTrail = useMemo(() => {
+    const trail: Snapshot["canvases"] = [];
+    let cur = browseIn;
+    while (cur) {
+      trail.unshift(cur);
+      cur = cur.parent_id ? canvases.find((c) => c.id === cur!.parent_id) ?? null : null;
+    }
+    return trail;
+  }, [browseIn, canvases]);
+  /** Les cibles de « Déplacer vers » : les **dossiers** uniquement (ce qui se range
+   *  va dans un conteneur, v1.6.2), sauf soi et ses descendants (un cycle serait
+   *  refusé par la base — l'écran ne propose même pas, c'est plus honnête). */
+  const moveTargets = useMemo(() => {
+    if (!sel || sel.kind !== "canvas") return [];
+    const forbidden = new Set<string>([sel.id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const c of canvases) {
+        if (forbidden.has(c.id)) continue;
+        if (c.parent_id && forbidden.has(c.parent_id)) {
+          forbidden.add(c.id);
+          grew = true;
+        }
+      }
+    }
+    return canvases.filter((c) => c.kind === "folder" && !forbidden.has(c.id));
+  }, [sel, canvases]);
   const conversations = useMemo(
     () =>
       [...canvases]
@@ -135,6 +189,38 @@ export function ExplorerScreen() {
     },
     [load]
   );
+
+  /** Ouvrir un élément depuis un raccourci (épinglés, activité récente) : un
+   *  dossier s'ouvre comme un dossier, un canvas comme un plan. */
+  const openFromShortcut = (id: string) => {
+    const c = canvases.find((x) => x.id === id);
+    if (c?.kind === "folder") {
+      setBrowseInId(id);
+      setSel(null);
+    } else {
+      setOpenCanvasId(id);
+      setSel(null);
+    }
+  };
+
+  /** Ouvrir la modale de création pour une nature et un parent donnés. */
+  const openNew = (kind: "canvas" | "folder", parentId: string | null) => {
+    setNewKind(kind);
+    setNewParentId(parentId);
+    setNewOpen(true);
+  };
+
+  /** Le clic sur une carte (v1.6.2) : un **dossier** s'ouvre comme un dossier (on
+   *  regarde dedans — sous-dossiers et canvas côte à côte), un **canvas** ouvre
+   *  son plan. C'est la distinction que la v1.6.1 n'avait pas. */
+  const openCard = (c: Snapshot["canvases"][number]) => {
+    if (c.kind === "folder") {
+      setBrowseInId(c.id);
+    } else {
+      setOpenCanvasId(c.id);
+      setSel(null);
+    }
+  };
 
   /** Le rechargement de données pour les gestes qui ne passent pas par `act` (les modales). */
   const refresh = useCallback(async () => {
@@ -186,31 +272,51 @@ export function ExplorerScreen() {
     );
   };
 
-  const remove = async (id: string, label: string, isDefault: boolean, frames: number, convs: number) => {
+  const remove = async (id: string, label: string, isDefault: boolean, frames: number, convs: number, children: number) => {
     if (isDefault) {
       setNotice("L'atelier n'est pas supprimable — c'est le réceptacle des détachements.");
       return;
     }
     const message =
       `Supprimer « ${label} » ?\n\n` +
+      `${children} élément(s) rangé(s) dedans remonteront d'un niveau (visibles là où « ${label} » était).\n` +
       `${frames} frame(s) seront dissoute(s), les objets rangés dedans restent visibles « hors frame » dans l'atelier.\n` +
       `${convs} conversation(s) seront déliée(s) — elles restent, hors tableau.\n\nCette action est irréversible.`;
     if (!window.confirm(message)) return;
     await act(
       () => fetch(`/api/canvases?id=${encodeURIComponent(id)}`, { method: "DELETE" }),
       (body) => {
-        const detached = (body as { detached?: { frames: number; conversations: number } }).detached;
+        const detached = (body as { detached?: { frames: number; conversations: number; children: number } }).detached;
         if (detached) {
           setNotice(
-            `« ${label} » supprimé — ${detached.frames} frame(s) dissoute(s), ${detached.conversations} conversation(s) déliée(s) (aucun objet supprimé).`
+            `« ${label} » supprimé — ${detached.children} élément(s) remonté(s), ${detached.frames} frame(s) dissoute(s), ${detached.conversations} conversation(s) déliée(s) (aucun objet supprimé).`
           );
         }
       }
     );
+    // le niveau visité peut être le tableau supprimé, **ou son ancêtre supprimé**
+    // (la remontée a déplacé les enfants) : on ne garde le niveau que s'il existe
+    // encore — un id orphelin laisserait une grille vide sans fil d'Ariane, sans
+    // moyen d'en sortir
+    const stillThere = canvases.some((c) => c.id === browseInId);
+    if (browseInId && !stillThere) setBrowseInId(null);
     if (openCanvasId === id) {
       setOpenCanvasId(null);
       setSel(null);
     }
+  };
+
+  /** Déplacer le tableau sélectionné sous une cible (ou à la racine) — les refus
+   *  nommés de l'API (cycle, atelier) deviennent une phrase, jamais un 500 muet. */
+  const moveTo = async (id: string, target: string | null) => {
+    const ok = await act(() =>
+      fetch(`/api/canvases?id=${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parentId: target }),
+      })
+    );
+    if (ok) setNotice(target ? "Tableau déplacé." : "Tableau remis à la racine.");
   };
 
   if (error && !snap) {
@@ -260,8 +366,7 @@ export function ExplorerScreen() {
               key={c.id}
               className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
               onClick={() => {
-                setOpenCanvasId(c.id);
-                setSel(null);
+                openFromShortcut(c.id);
               }}
             >
               <span className={`size-2.5 shrink-0 rounded-sm ${canvasColorClass(c.color)}`} />
@@ -297,23 +402,73 @@ export function ExplorerScreen() {
               <span className="text-xs text-muted-foreground">
                 {canvases.length} tableau(x) · {canvases.reduce((n, c) => n + c.totals.conversations, 0)} conversation(s)
               </span>
-              <Button size="sm" className="ml-auto" onClick={() => setNewOpen(true)}>
-                <Plus className="mr-1 size-4" /> Nouveau tableau
+              <Button size="sm" className="ml-auto" onClick={() => openNew("canvas", browseInId)}>
+                <Plus className="mr-1 size-4" /> Nouveau canvas
               </Button>
             </div>
+            {/* le fil d'Ariane du niveau visité (v1.6.1 : les sous-tableaux) */}
+            {browseIn && (
+              <div className="mb-3 flex items-center gap-1.5 text-sm text-muted-foreground">
+                <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => setBrowseInId(null)}>
+                  <CornerUpLeft className="mr-1 size-3.5" /> Racine
+                </Button>
+                {browseTrail.map((c, i) => (
+                  <span key={c.id} className="flex items-center gap-1.5">
+                    <span className="text-border">/</span>
+                    <button
+                      className={`rounded px-1.5 py-0.5 hover:bg-muted hover:text-foreground ${i === browseTrail.length - 1 ? "font-medium text-foreground" : ""}`}
+                      onClick={() => setBrowseInId(c.id)}
+                    >
+                      {c.label}
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             {notice && <p className="mb-3 rounded-md border border-border bg-muted/50 px-3 py-2 text-sm">{notice}</p>}
             <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
-              {canvases.map((c) => (
+              {level.map((c) => (
                 <div
                   key={c.id}
                   className="group relative cursor-pointer rounded-xl border border-border bg-card p-4 shadow-sm transition-shadow hover:shadow-md"
-                  onClick={() => {
-                    setOpenCanvasId(c.id);
-                    setSel(null);
-                  }}
-                  title="Cliquer : ouvrir le tableau"
+                  onClick={() => openCard(c)}
+                  title={
+                    c.kind === "folder"
+                      ? "Cliquer : entrer dans le dossier"
+                      : "Cliquer : ouvrir le canvas"
+                  }
                 >
                   <div className="absolute right-2 top-2 hidden gap-0.5 group-hover:flex">
+                    {/* créer DEDANS : un dossier reçoit canvas et sous-dossiers ;
+                        un canvas ne reçoit rien (ce n'est pas un conteneur) */}
+                    {c.kind === "folder" && (
+                      <>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="size-7 bg-card"
+                          title="Nouveau canvas dans ce dossier"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openNew("canvas", c.id);
+                          }}
+                        >
+                          <FileText className="size-3.5" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="size-7 bg-card"
+                          title="Nouveau sous-dossier dans ce dossier"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openNew("folder", c.id);
+                          }}
+                        >
+                          <Plus className="size-3.5" />
+                        </Button>
+                      </>
+                    )}
                     <Button
                       size="icon"
                       variant="ghost"
@@ -350,6 +505,18 @@ export function ExplorerScreen() {
                     >
                       <Pencil className="size-3.5" />
                     </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="size-7 bg-card"
+                      title="Déplacer vers…"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSel({ kind: "canvas", id: c.id });
+                      }}
+                    >
+                      <FolderInput className="size-3.5" />
+                    </Button>
                     {!c.is_default && (
                       <Button
                         size="icon"
@@ -358,14 +525,21 @@ export function ExplorerScreen() {
                         title="Supprimer"
                         onClick={(e) => {
                           e.stopPropagation();
-                          void remove(c.id, c.label, c.is_default, c.totals.frames, c.totals.conversations);
+                          const children = canvases.filter((x) => x.parent_id === c.id).length;
+                          void remove(c.id, c.label, c.is_default, c.totals.frames, c.totals.conversations, children);
                         }}
                       >
                         <Trash2 className="size-3.5" />
                       </Button>
                     )}
                   </div>
-                  <Folder className={`mb-3 size-9 ${canvasColorClass(c.color)} rounded-md p-1.5 text-white`} fill="currentColor" />
+                  {/* l'icône dit la nature : dossier ouvert (conteneur) ou plan
+                      (surface) — le double-clic n'existe pas, un clic suffit */}
+                  {c.kind === "folder" ? (
+                    <FolderOpen className="mb-3 size-9 text-foreground" />
+                  ) : (
+                    <Presentation className={`mb-3 size-9 ${canvasColorClass(c.color)} rounded-md p-1.5 text-white`} fill="currentColor" />
+                  )}
                   <p className="text-sm font-medium">
                     {c.label}
                     {c.is_default && <span className="ml-1 text-xs font-normal text-muted-foreground">(atelier)</span>}
@@ -378,11 +552,20 @@ export function ExplorerScreen() {
                   <p className="mt-1 hidden text-[11px] text-muted-foreground group-hover:block">cliquer pour ouvrir ↵</p>
                 </div>
               ))}
+              {/* les DEUX créations du niveau visité (v1.6.2 : le cœur de la
+                  demande) — canvas et dossier côte à côte, comme « Nouveau
+                  dossier » et « Nouveau document » d'un explorateur de fichiers */}
               <button
                 className="flex min-h-[128px] items-center justify-center gap-2 rounded-xl border-[1.5px] border-dashed border-border text-sm text-muted-foreground hover:border-foreground hover:text-foreground"
-                onClick={() => setNewOpen(true)}
+                onClick={() => openNew("canvas", browseInId)}
               >
-                <Plus className="size-4" /> Nouveau tableau
+                <Presentation className="size-4" /> Nouveau canvas
+              </button>
+              <button
+                className="flex min-h-[128px] items-center justify-center gap-2 rounded-xl border-[1.5px] border-dashed border-border text-sm text-muted-foreground hover:border-foreground hover:text-foreground"
+                onClick={() => openNew("folder", browseInId)}
+              >
+                <FolderPlus className="size-4" /> Nouveau dossier
               </button>
             </div>
 
@@ -395,8 +578,7 @@ export function ExplorerScreen() {
                     className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
                     onClick={() => {
                       if (e.kind === "canvas") {
-                        setOpenCanvasId(e.id);
-                        setSel(null);
+                        openFromShortcut(e.id);
                       } else if (e.kind === "conversation") setSel({ kind: "conversation", id: e.id });
                       else if (e.kind === "synthesis") router.push(`/syntheses#${e.id}`);
                     }}
@@ -414,8 +596,11 @@ export function ExplorerScreen() {
         ) : (
           <>
             <div className="mb-4 flex items-center gap-3">
+              {/* « Tableaux » referme le plan et rend le niveau visité : si on
+                  avait ouvert un canvas DANS un dossier, on retourne à CE dossier
+                  (le fil d'Ariane reste) — pas un saut brutal à la racine */}
               <Button size="sm" variant="outline" onClick={() => setOpenCanvasId(null)}>
-                <ArrowLeft className="mr-1 size-4" /> Tableaux
+                <ArrowLeft className="mr-1 size-4" /> {browseIn ? "Dossier" : "Tableaux"}
               </Button>
               <h1 className="text-xl font-semibold tracking-tight">
                 {open.label}
@@ -481,10 +666,33 @@ export function ExplorerScreen() {
 
       <NewCanvasModal
         open={newOpen}
-        onClose={() => setNewOpen(false)}
+        kind={newKind}
+        onClose={() => {
+          setNewOpen(false);
+          setNewParentId(null);
+        }}
+        parentId={newParentId}
         onCreated={(id) => {
           setNewOpen(false);
-          setOpenCanvasId(id);
+          setNewParentId(null);
+          // La nature du créé est **la prop `kind` de la modale** — jamais une
+          // recherche dans `canvases` : ce tableau de l'écran est la closure du
+          // rendu précédent (le snapshot rechargé n'a pas encore re-rendu), il
+          // ne contient pas l'entrée neuve et la devinette tombait sur `undefined`
+          // → un dossier créé se retrouvait « ouvert » comme un plan vide.
+          if (newKind === "folder") {
+            // un dossier vient de naître : on **entre dedans** (c'est son usage —
+            // le voir et le remplir), jamais son « plan » qui n'existe pas
+            setBrowseInId(id);
+            setOpenCanvasId(null);
+            setSel(null);
+          } else {
+            // un canvas vient de naître : on ouvre **son plan** — ou, s'il a été
+            // créé dans un dossier, on entre dans le dossier pour le voir dedans
+            setBrowseInId(newParentId);
+            setOpenCanvasId(id);
+            setSel(null);
+          }
         }}
         refresh={refresh}
       />
@@ -495,6 +703,19 @@ export function ExplorerScreen() {
           sans effet de remise à zéro (react-hooks/set-state-in-effect). */}
       {convOpen && (
         <NewConversationModal onClose={() => setConvOpen(false)} preChecked={convTarget} canvases={canvases} />
+      )}
+      {/* Déplacer le tableau sélectionné (bouton « Déplacer vers… » d'une carte) :
+          les cibles excluent déjà soi et ses descendants (un cycle serait refusé
+          par la base — l'écran ne propose même pas). */}
+      {sel?.kind === "canvas" && (
+        <MoveCanvasModal
+          canvas={canvases.find((c) => c.id === sel.id) ?? null}
+          targets={moveTargets}
+          onClose={() => setSel(null)}
+          onMove={(target) => {
+            void moveTo(sel.id, target).then(() => setSel(null));
+          }}
+        />
       )}
     </div>
   );
@@ -807,6 +1028,66 @@ function Preview({
   );
 }
 
+/* ────────────────────────── déplacer un tableau (v1.6.1) ───────────────────── */
+
+/**
+ * « Déplacer vers… » : la cible choisie dans une liste plate — l'arbre récursif
+ * dans une modale serait une arme à cycles pour les mains de l'utilisateur ; les
+ * cibles excluent déjà soi et ses descendants, et « racine » est toujours là.
+ * Les refus nommés de l'API (l'atelier, un cycle apparu entre-temps) deviennent
+ * une phrase via `moveTo` — jamais un 500 muet.
+ */
+function MoveCanvasModal({
+  canvas,
+  targets,
+  onClose,
+  onMove,
+}: {
+  canvas: Snapshot["canvases"][number] | null;
+  targets: Snapshot["canvases"];
+  onClose: () => void;
+  onMove: (target: string | null) => void;
+}) {
+  if (!canvas) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30" onClick={onClose}>
+      <div className="w-[420px] rounded-xl border border-border bg-card p-5 shadow-lg" onClick={(e) => e.stopPropagation()}>
+        <p className="text-sm font-semibold">
+          Déplacer « {canvas.label} » vers…
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Le tableau et tout ce qu&apos;il contient suivent — ses sous-tableaux compris.
+        </p>
+        <div className="mt-3 max-h-[300px] space-y-0.5 overflow-y-auto">
+          <button
+            className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm hover:bg-muted"
+            onClick={() => onMove(null)}
+          >
+            <CornerUpLeft className="size-3.5 shrink-0" /> À la racine
+          </button>
+          {targets.map((t) => (
+            <button
+              key={t.id}
+              className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm hover:bg-muted"
+              onClick={() => onMove(t.id)}
+            >
+              <Folder className={`size-3.5 shrink-0 rounded-sm ${canvasColorClass(t.color)}`} fill="currentColor" />
+              <span className="min-w-0 flex-1 truncate">{t.label}</span>
+              {t.is_default && <span className="text-[11px] text-muted-foreground">(atelier)</span>}
+            </button>
+          ))}
+          {targets.length === 0 && (
+            <p className="px-2.5 py-2 text-xs text-muted-foreground">Aucune autre destination disponible.</p>
+          )}
+        </div>
+        <div className="mt-4 flex justify-end">
+          <Button variant="outline" size="sm" onClick={onClose}>Annuler</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ────────────────────────── les liens IA d'un objet (AC3) ───────────────────── */
 
 /**
@@ -847,28 +1128,36 @@ function NodeLinks({ node }: { node: Snapshot["canvases"][number]["nodes"][numbe
 
 function NewCanvasModal({
   open,
+  kind,
   onClose,
   onCreated,
+  /** Le dossier dans lequel créer (sous-élément) — null ou absent : à la racine. */
+  parentId,
   /** Le rechargement du snapshot après création (l'écran reste la vérité de la base). */
   refresh,
 }: {
   open: boolean;
+  /** Ce qu'on crée : un canvas (surface) ou un dossier (conteneur) — v1.6.2. */
+  kind: "canvas" | "folder";
   onClose: () => void;
   onCreated: (id: string) => void;
+  parentId?: string | null;
   refresh: () => Promise<void>;
 }) {
   const [label, setLabel] = useState("");
   const [color, setColor] = useState<string | null>(CANVAS_COLORS[2] ?? null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   if (!open) return null;
+  const noun = kind === "folder" ? "dossier" : "canvas";
   const submit = async () => {
     if (!label.trim()) return;
     setBusy(true);
     const res = await fetch("/api/canvases", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ label: label.trim(), color }),
+      body: JSON.stringify({ label: label.trim(), color, kind, ...(parentId ? { parentId } : {}) }),
     });
     setBusy(false);
     if (res.ok) {
@@ -876,12 +1165,16 @@ function NewCanvasModal({
       setLabel("");
       await refresh();
       onCreated(row.id);
+    } else {
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      setError(body.error ?? `échec (${res.status})`);
     }
   };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30" onClick={onClose}>
       <div className="w-[420px] rounded-xl border border-border bg-card p-5 shadow-lg" onClick={(e) => e.stopPropagation()}>
-        <p className="text-sm font-semibold">Nouveau tableau</p>
+        <p className="text-sm font-semibold">Nouveau {noun}{parentId ? " (dans le dossier visité)" : ""}</p>
+        {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
         <label className="mt-3 block text-xs text-muted-foreground" htmlFor="new-canvas-label">Nom</label>
         <Input
           id="new-canvas-label"
@@ -911,7 +1204,7 @@ function NewCanvasModal({
         <div className="mt-5 flex justify-end gap-2">
           <Button variant="outline" size="sm" onClick={onClose}>Annuler</Button>
           <Button size="sm" onClick={() => void submit()} disabled={busy || !label.trim()}>
-            {busy && <Loader2 className="mr-1 size-3.5 animate-spin" />} Créer
+            {busy && <Loader2 className="mr-1 size-3.5 animate-spin" />} Créer le {noun}
           </Button>
         </div>
       </div>
@@ -972,7 +1265,9 @@ function NewConversationModal({
           Tableaux liés <span className="font-normal">(les constructions cochées nourrissent le contexte du tour — plafonnées)</span>
         </label>
         <div className="mt-1.5 space-y-1">
-          {canvases.map((c) => (
+          {/* les canvas uniquement : un dossier ne porte rien à discuter
+              (garde `conversation_dans_dossier` côté dépôt) */}
+          {canvases.filter((c) => c.kind === "canvas").map((c) => (
             <label key={c.id} className="flex items-center gap-2 rounded-md px-1 py-1 text-sm hover:bg-muted">
               <input
                 type="checkbox"
