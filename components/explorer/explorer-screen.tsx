@@ -1004,12 +1004,17 @@ function SlideOver({
       className="fixed inset-0 z-40 flex justify-end"
     >
       {/* Le calage : il ferme au clic, et il rend le fond non cliquable pendant
-          l'inspection — on ne déclenche pas une sélection derrière un panneau. */}
+          l'inspection — on ne déclenche pas une sélection derrière un panneau.
+
+          `bg-black`, et non `bg-foreground` comme les modales : en thème sombre
+          `foreground` est presque blanc, donc un voile `foreground/40` éclaircit
+          l'écran au lieu de l'assombrir (constaté sur la capture). Un calage doit
+          toujours assombrir, quel que soit le thème. */}
       <button
         type="button"
         aria-label="Fermer le détail"
         onClick={onClose}
-        className="animate-in absolute inset-0 bg-foreground/40 duration-150 fade-in-0"
+        className="animate-in absolute inset-0 bg-black/50 duration-150 fade-in-0"
       />
       <div className="animate-in relative flex h-full w-[380px] max-w-full flex-col overflow-y-auto border-l border-border bg-card px-4 py-4 shadow-xl slide-in-from-right duration-200">
         <div className="mb-3 flex items-center justify-between">
@@ -1274,7 +1279,7 @@ function CanvasVignette({
         )}
       </div>
       <p className="border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
-        ◇ vignette rendue depuis les positions réelles — cliquer un objet le sélectionne (aperçu à droite) ·{" "}
+        ◇ vignette rendue depuis les positions réelles — cliquer un objet ouvre son détail ·{" "}
         <Link className="underline" href={`/canvas/${canvas.id}`}>plein écran du tableau</Link>
       </p>
     </div>

@@ -29,13 +29,20 @@ export const metadata: Metadata = {
  * HTML servi (donc exécuté avant la première peinture) et s'assure qu'il ne
  * rejoue pas à chaque navigation — ce qui est exactement le contrat voulu. Un
  * script inline dans un composant React n'est exécuté qu'au premier chargement
- *SSR et déclenche en plus un avertissement React.
+ * SSR et déclenche en plus un avertissement React.
+ *
+ * `suppressHydrationWarning` sur `<html>` n'est pas de la déco : le serveur rend
+ * `class="h-full antialiased"` (il ignore le localStorage, il ne peut pas le
+ * lire), puis le script ajoute `dark` **avant** que React n'hydrate. Sans la
+ * suppression, React compare les deux et signale un mismatch d'attributs à chaque
+ * chargement — vérifié au navigateur : l'avertissement est réel, pas théorique.
+ * Seul `<html>` est concerné : c'est le seul nœud que ce script modifie.
  */
 const THEME_BOOT = `(function(){try{var t=localStorage.getItem("theme");var d=t?t==="dark":true;document.documentElement.classList.toggle("dark",d);}catch(e){document.documentElement.classList.add("dark");}})();`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="fr" className="h-full antialiased">
+    <html lang="fr" className="h-full antialiased" suppressHydrationWarning>
       <body className="h-full overflow-hidden bg-background text-foreground">
         <Script id="theme-boot" strategy="beforeInteractive">
           {THEME_BOOT}
