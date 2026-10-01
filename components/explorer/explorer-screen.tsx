@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   CornerUpLeft,
   FileText,
+  Info,
   Folder,
   FolderInput,
   FolderOpen,
@@ -19,9 +20,11 @@ import {
   Plus,
   Presentation,
   RefreshCw,
+  Search,
   Sparkles,
   Trash2,
   Upload,
+  X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -75,6 +78,19 @@ export function ExplorerScreen() {
   const [browseInId, setBrowseInId] = useState<string | null>(null);
   // l'objet sélectionné (aperçu) : une construction, une frame, une conversation…
   const [sel, setSel] = useState<{ kind: "node" | "frame" | "canvas" | "conversation"; id: string } | null>(null);
+  /**
+   * Le panneau d'inspection est **distinct** de `sel`, et c'est délibéré.
+   *
+   * `sel.kind === "canvas"` ne veut pas dire « un tableau est sélectionné » : ce
+   * genre de sélection est déjà celui de la modale « Déplacer vers… » (son `onClose`
+   * remet `sel` à null). Si le panneau s'ouvrait sur `sel`, le bouton Déplacer
+   * d'une carte ouvrirait deux choses à la fois, et fermer l'une fermerait l'autre.
+   *
+   * `inspect` répond donc à une seule question — « le panneau est-il à l'écran ? » —
+   * et `pick()` est le geste unique « regarde ça » : il pose la sélection **et**
+   * ouvre le panneau.
+   */
+  const [inspect, setInspect] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   // la nature à créer dans la modale (« canvas » ou « dossier » — v1.6.2)
   const [newKind, setNewKind] = useState<"canvas" | "folder">("canvas");
@@ -256,6 +272,19 @@ export function ExplorerScreen() {
       setOpenCanvasId(id);
       setSel(null);
     }
+  };
+
+  /**
+   * « Regarde ça » : le geste unique d'inspection. Il pose la sélection **et**
+   * ouvre le panneau coulissant.
+   *
+   * Passer par ici plutôt que par `setSel` directement, c'est ce qui empêche le
+   * demi-écat : `sel` sert aussi à la modale Déplacer, et ouvrir le panneau à chaque
+   * `setSel` reviendrait à faire apparaître un panneau quand on déplace un tableau.
+   */
+  const pick = (kind: "node" | "frame" | "conversation", id: string) => {
+    setSel({ kind, id });
+    setInspect(true);
   };
 
   /** Ouvrir la modale de création pour une nature et un parent donnés. */
@@ -688,7 +717,7 @@ export function ExplorerScreen() {
                     onClick={() => {
                       if (e.kind === "canvas") {
                         openFromShortcut(e.id);
-                      } else if (e.kind === "conversation") setSel({ kind: "conversation", id: e.id });
+                      } else if (e.kind === "conversation") pick("conversation", e.id);
                       else if (e.kind === "synthesis") router.push(`/syntheses#${e.id}`);
                     }}
                   >
@@ -734,7 +763,21 @@ export function ExplorerScreen() {
                   <FolderOpen className="mr-1 size-4" /> Contenu ({openChildCount})
                 </Button>
               )}
-              <Button size="sm" variant="outline" className="ml-auto" asChild>
+              {/* « Détails » ouvre le panneau sur le tableau lui-même : sans lui, la
+                  fiche d'un canvas ouvert (frames, conversations ancrées) n'aurait
+                  plus aucun accès, puisque le panneau ne s'ouvre plus tout seul. */}
+              <Button
+                size="sm"
+                variant="outline"
+                className="ml-auto"
+                onClick={() => {
+                  setSel(null);
+                  setInspect(true);
+                }}
+              >
+                <Info className="mr-1 size-4" /> Détails
+              </Button>
+              <Button size="sm" variant="outline" asChild>
                 {/* AC2 : si une frame est sélectionnée, le focalisé centre dessus */}
                 <Link href={`/canvas/${open.id}${sel?.kind === "frame" ? `?frame=${sel.id}` : ""}`}>
                   Plein écran
@@ -757,7 +800,7 @@ export function ExplorerScreen() {
                   size="sm"
                   variant={sel?.kind === "frame" && sel.id === f.id ? "default" : "outline"}
                   className="h-7 text-xs"
-                  onClick={() => setSel({ kind: "frame", id: f.id })}
+                  onClick={() => pick("frame", f.id)}
                 >
                   ▦ {f.label} · {f.constructions + f.sources}
                 </Button>
@@ -767,8 +810,8 @@ export function ExplorerScreen() {
             <CanvasVignette
               canvas={open}
               selectedNodeId={sel?.kind === "node" ? sel.id : null}
-              onSelect={(ref) => setSel({ kind: "node", id: ref })}
-              onSelectFrame={(id) => setSel({ kind: "frame", id })}
+              onSelect={(ref) => pick("node", ref)}
+              onSelectFrame={(id) => pick("frame", id)}
               /* v1.6.3 : déposer des fichiers sur le plan ouvert, sans passer par
                  le plein écran — le canvas de l'explorateur reçoit aussi. */
               setDropTarget={setDropOn}
@@ -904,6 +947,80 @@ export function ExplorerScreen() {
           }}
         />
       )}
+
+      {/* Le panneau d'inspection : l'aperçu d'avant, mais **coulissant**. Au repos
+          l'écran n'a qu'une colonne (c'était le grief : deux barres verticales) ; le
+          détail arrive par-dessus, à la demande d'un clic. */}
+      {inspect ? (
+        <SlideOver title="Détail" onClose={() => setInspect(false)}>
+          <Preview
+            snap={snap}
+            sel={sel}
+            setSel={setSel}
+            openCanvas={open}
+            setConvOpen={(canvasId) => {
+              setConvTarget(canvasId);
+              setConvOpen(true);
+            }}
+          />
+        </SlideOver>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Le panneau coulissant : un calage sombre + une feuille qui glisse depuis la
+ * droite. Il se ferme par le bouton, le calage ou Échap — trois sorties, parce
+ * qu'un panneau qui n'a qu'une seule façon de sortir est un panneau qui finit
+ * coincé en traversant le reste de l'app.
+ *
+ * `autoFocus` est sur le bouton de fermeture : à l'ouverture, la première chose
+ * que Tab atteint est la sortie, jamais un lien du panneau qui se trouve sous la
+ * main.
+ */
+function SlideOver({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      className="fixed inset-0 z-40 flex justify-end"
+    >
+      {/* Le calage : il ferme au clic, et il rend le fond non cliquable pendant
+          l'inspection — on ne déclenche pas une sélection derrière un panneau. */}
+      <button
+        type="button"
+        aria-label="Fermer le détail"
+        onClick={onClose}
+        className="animate-in absolute inset-0 bg-foreground/40 duration-150 fade-in-0"
+      />
+      <div className="animate-in relative flex h-full w-[380px] max-w-full flex-col overflow-y-auto border-l border-border bg-card px-4 py-4 shadow-xl slide-in-from-right duration-200">
+        <div className="mb-3 flex items-center justify-between">
+          <p className="text-[11px] uppercase tracking-wider text-muted-foreground">{title}</p>
+          <Button size="icon" variant="ghost" className="size-7" onClick={onClose} autoFocus>
+            <X className="size-4" />
+            <span className="sr-only">Fermer</span>
+          </Button>
+        </div>
+        {children}
+      </div>
     </div>
   );
 }
@@ -1220,6 +1337,264 @@ function MoveCanvasModal({
           <Button variant="outline" size="sm" onClick={onClose}>Annuler</Button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ────────────────────────── le panneau de détail (ex-apercu) ────────────────────────── */
+
+function Preview({
+  snap,
+  sel,
+  setSel,
+  openCanvas,
+  setConvOpen,
+}: {
+  snap: Snapshot;
+  sel: { kind: "node" | "frame" | "canvas" | "conversation"; id: string } | null;
+  setSel: (s: { kind: "node" | "frame" | "canvas" | "conversation"; id: string } | null) => void;
+  openCanvas: Snapshot["canvases"][number] | null;
+  setConvOpen: (canvasId: string | null) => void;
+}) {
+  const node = useMemo(() => {
+    if (sel?.kind !== "node" || !openCanvas) return null;
+    return openCanvas.nodes.find((n) => n.ref === sel.id) ?? null;
+  }, [sel, openCanvas]);
+  const frame = useMemo(() => {
+    if (sel?.kind !== "frame" || !openCanvas) return null;
+    return openCanvas.frames.find((f) => f.id === sel.id) ?? null;
+  }, [sel, openCanvas]);
+  const conv = useMemo(() => {
+    if (sel?.kind !== "conversation") return null;
+    for (const c of snap.canvases) {
+      const found = c.conversations.find((v) => v.id === sel.id);
+      if (found) return found;
+    }
+    return null;
+  }, [sel, snap]);
+
+  if (conv) {
+    return (
+      <div>
+        <p className="text-sm font-semibold leading-6">{conv.title}</p>
+        <p className="mt-0.5 text-xs text-muted-foreground">Conversation · active {relTime(conv.updated_at)}</p>
+        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Agir</p>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button size="sm" asChild>
+            <Link href={`/conversation/${conv.id}`}>Ouvrir la conversation</Link>
+          </Button>
+        </div>
+        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Tableaux liés</p>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {snap.canvases
+            .filter((c) => c.conversations.some((v) => v.id === conv.id))
+            .map((c) => (
+              <Badge key={c.id} variant="outline" className="gap-1.5 font-normal">
+                <span className={`size-2 rounded-sm ${canvasColorClass(c.color)}`} />
+                {c.label}
+              </Badge>
+            ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (node && openCanvas) {
+    return (
+      <div>
+        <p className="text-sm font-semibold leading-6">
+          {node.kind === "source" ? node.title : node.text}
+        </p>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {node.kind === "source" ? "Fichier" : "Construction"} · tableau « {openCanvas.label} »
+          {node.frame_id ? "" : " · hors frame"}
+        </p>
+        {node.kind === "construction" && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Statut : {node.epistemic_status.toLowerCase()}
+            {node.stale ? " · périmé (une source citée a disparu)" : ""}
+          </p>
+        )}
+        {node.kind === "source" && (
+          <p className="mt-2 text-xs text-muted-foreground">{node.fragment_count} fragment(s)</p>
+        )}
+        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Liens IA</p>
+        <NodeLinks node={node} />
+        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Agir</p>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button size="sm" onClick={() => setConvOpen(openCanvas.id)}>
+            <MessageSquare className="mr-1 size-4" /> Discuter de ça
+          </Button>
+          {/* AC3 : chaque action mène à l'écran existant — elle ne le réinvente pas.
+              « Investiguer » n'a de sens que pour une suggestion ; « Synthétiser »
+              n'existe que pour une source (une synthèse cite des sources). */}
+          {node.links.suggestions > 0 && (
+            <Button size="sm" variant="outline" asChild>
+              <Link href="/suggestions">
+                <Search className="mr-1 size-4" /> Investiguer ({node.links.suggestions})
+              </Link>
+            </Button>
+          )}
+          {node.kind === "source" && node.links.syntheses > 0 && (
+            <Button size="sm" variant="outline" asChild>
+              <Link href="/syntheses">
+                <Sparkles className="mr-1 size-4" /> Synthétiser ({node.links.syntheses})
+              </Link>
+            </Button>
+          )}
+          <Button size="sm" variant="outline" asChild>
+            {/* AC2 : l'objet vit peut-être dans une frame — le focalisé l'ouvre dessus */}
+            <Link href={`/canvas/${openCanvas.id}${node.frame_id ? `?frame=${node.frame_id}` : ""}`}>
+              Plein écran
+            </Link>
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (frame && openCanvas) {
+    return (
+      <div>
+        <p className="text-sm font-semibold leading-6">{frame.label}</p>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          Frame du tableau « {openCanvas.label} » · {frame.constructions + frame.sources} objet(s)
+        </p>
+        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Agir</p>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button size="sm" onClick={() => setConvOpen(openCanvas.id)}>
+            <MessageSquare className="mr-1 size-4" /> Discuter de ça
+          </Button>
+          <Button size="sm" variant="outline" asChild>
+            {/* AC2 : ouvrir le plan centré sur CETTE frame */}
+            <Link href={`/canvas/${openCanvas.id}?frame=${frame.id}`}>Plein écran</Link>
+          </Button>
+        </div>
+        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Objets de la frame</p>
+        <div className="mt-2 space-y-1">
+          {openCanvas.nodes
+            .filter((n) => n.frame_id === frame.id)
+            .map((n) => (
+              <button
+                key={n.ref}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted"
+                onClick={() => setSel({ kind: "node", id: n.ref })}
+              >
+                {n.kind === "source" ? <FileText className="size-3.5 shrink-0" /> : <Sparkles className="size-3.5 shrink-0" />}
+                <span className="min-w-0 flex-1 truncate">{n.kind === "source" ? n.title : n.text}</span>
+              </button>
+            ))}
+          {frame.constructions + frame.sources === 0 && <p className="text-xs text-muted-foreground">Frame vide.</p>}
+        </div>
+      </div>
+    );
+  }
+
+  if (openCanvas) {
+    return (
+      <div>
+        <p className="text-sm font-semibold leading-6">{openCanvas.label}</p>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          Tableau{openCanvas.is_default ? " — l'atelier (non supprimable)" : ""} · {openCanvas.totals.frames} frame(s) ·{" "}
+          {openCanvas.totals.constructions + openCanvas.totals.sources} objet(s)
+        </p>
+        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Agir</p>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button size="sm" onClick={() => setConvOpen(openCanvas.id)}>
+            <MessageSquare className="mr-1 size-4" /> Discuter de ça
+          </Button>
+          <Button size="sm" variant="outline" asChild>
+            <Link href={`/canvas/${openCanvas.id}`}>Plein écran</Link>
+          </Button>
+        </div>
+        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">
+          Conversations ancrées ({openCanvas.conversations.length})
+        </p>
+        <div className="mt-2 space-y-1">
+          {openCanvas.conversations.map((v) => (
+            <button
+              key={v.id}
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted"
+              onClick={() => setSel({ kind: "conversation", id: v.id })}
+            >
+              <MessageSquare className="size-3.5 shrink-0" />
+              <span className="min-w-0 flex-1 truncate">{v.title}</span>
+            </button>
+          ))}
+          {openCanvas.conversations.length === 0 && (
+            <p className="text-xs text-muted-foreground">Aucune — « Discuter de ça » depuis un objet, ou ⤵</p>
+          )}
+        </div>
+        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Frames</p>
+        <div className="mt-2 space-y-1">
+          {openCanvas.frames.map((f) => (
+            <button
+              key={f.id}
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted"
+              onClick={() => setSel({ kind: "frame", id: f.id })}
+            >
+              <span className="min-w-0 flex-1 truncate">▦ {f.label}</span>
+              <Badge variant="outline" className="text-[10px] font-normal text-muted-foreground">
+                {f.constructions + f.sources}
+              </Badge>
+            </button>
+          ))}
+          {openCanvas.frames.length === 0 && <p className="text-xs text-muted-foreground">Aucune frame.</p>}
+        </div>
+        {openCanvas.is_default && openCanvas.unframed.constructions + openCanvas.unframed.sources > 0 && (
+          <p className="mt-4 text-xs text-muted-foreground">
+            {openCanvas.unframed.constructions + openCanvas.unframed.sources} objet(s) « hors frame » — posés librement sur le plan.
+          </p>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <p className="text-sm font-semibold">Rien de sélectionné</p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Cliquez un dossier (il s&apos;ouvre), une conversation, ou un objet sur le plan.
+      </p>
+      <Button size="sm" className="mt-4" onClick={() => setConvOpen(null)}>
+        <MessageSquare className="mr-1 size-4" /> Nouvelle conversation
+      </Button>
+    </div>
+  );
+}
+
+/* ────────────────────────── les liens IA d'un objet (AC3) ───────────────────── */
+
+/**
+ * Les liens d'un objet : **des compteurs**, jamais des listes complètes. L'écran
+ * expert (/suggestions, /syntheses) porte le détail et les décisions — l'aperçu
+ * dit « ce qui existe » et les boutons y mènent (AC3 : « chaque action mène aux
+ * écrans existants, elle ne les réinvente pas »).
+ */
+function NodeLinks({ node }: { node: Snapshot["canvases"][number]["nodes"][number] }) {
+  const entries: { label: string; n: number }[] = [
+    { label: node.kind === "construction" ? "suggestion parente" : "suggestion(s) ouverte(s)", n: node.links.suggestions },
+    ...(node.kind === "source" ? [{ label: "synthèse(s) proposée(s)", n: node.links.syntheses }] : []),
+    ...(node.links.investigations > 0 ? [{ label: "enquête(s)", n: node.links.investigations }] : []),
+  ];
+  const active = entries.filter((e) => e.n > 0);
+  if (active.length === 0) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        {node.kind === "source"
+          ? "Aucune connexion proposée pour l'instant — l'analyse tourne en tâche de fond."
+          : "Aucun lien d'analyse — cette construction vient d'une intégration."}
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {active.map((e) => (
+        <Badge key={e.label} variant="outline" className="gap-1.5 font-normal">
+          {e.label}
+          <span className="font-medium">{e.n}</span>
+        </Badge>
+      ))}
     </div>
   );
 }
