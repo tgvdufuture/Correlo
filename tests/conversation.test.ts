@@ -537,6 +537,149 @@ describe("service : tour de conversation", () => {
     expect(claims[1].provenance).toEqual([]);
   });
 
+  /**
+   * Contrat v9 (décision du 2026-10-01) : le modèle rend une **prose** et ses sources, et
+   * c'est le serveur qui découpe en phrases et rattache. Ce qui est testé ici est le
+   * rattachement, pas la qualité du découpage : une phrase recouvre une source si ses mots
+   * de contenu s'y retrouvent (asymétrique, seuil 0,34).
+   */
+  it("une réponse en prose est découpée par le serveur, et les sources déclarées sont rattachées aux phrases", async () => {
+    const { db, fA, fB } = setup();
+    const synthId = seedSynthesis(db, [fA, fB]);
+    const { conversations } = startTurn(db, "Que dit le corpus de la mesure ?", { anchor: synthId });
+    const llm = new ScriptedLlm([
+      { action: "search", query: "doute" },
+      {
+        action: "answer",
+        answer: {
+          prose:
+            "Le doute methodique ecarte les opinions seulement probables. " +
+            "La mesure experimentale fixe les conditions de l'observation. " +
+            "On peut donc lire ces deux textes comme un meme mouvement.",
+          citations: [0, 1],
+        },
+      },
+    ]);
+    const result = await makeService(db, llm).run("conv-1", {
+      messageId: "msg-assistant-1",
+      questionMessageId: "msg-user-1",
+      question: "Que dit le corpus de la mesure ?",
+    });
+
+    expect(result.status).toBe("done");
+    const claims = JSON.parse(conversations.getMessage("msg-assistant-1")?.claims as string);
+    expect(claims).toHaveLength(3);
+    // phrase 1 : recouverte par le fragment cité (doute)
+    expect(claims[0].provenance.map((p: { kind: string }) => p.kind)).toEqual(["fragment"]);
+    // phrase 2 : recouverte par l'autre fragment cité (mesure)
+    expect(claims[1].provenance.map((p: { kind: string }) => p.kind)).toEqual(["fragment"]);
+    // phrase 3 : transition assumée, sans recouvrement — marquée propre au modèle
+    expect(claims[2].own_knowledge).toBe(true);
+    expect(claims[2].provenance).toEqual([]);
+    expect(conversations.getMessage("msg-assistant-1")?.text).toContain("meme mouvement");
+  });
+
+  it("une réponse 100 % own_knowledge est recevable : le modèle assume, l'écran dira quoi", async () => {
+    const { db } = setup();
+    const { conversations } = startTurn(db, "Que dit le corpus de la mesure ?");
+    const llm = new ScriptedLlm([
+      { action: "search", query: "mesure" },
+      {
+        action: "answer",
+        answer: {
+          prose: "Le corpus ne parle pas de mesure au sens scientifique : ici, il s'agit de mesure expérimentale au sens de Claude Bernard.",
+          own_knowledge: true,
+        },
+      },
+    ]);
+    const result = await makeService(db, llm).run("conv-1", {
+      messageId: "msg-assistant-1",
+      questionMessageId: "msg-user-1",
+      question: "Que dit le corpus de la mesure ?",
+    });
+
+    expect(result.status).toBe("done");
+    const claims = JSON.parse(conversations.getMessage("msg-assistant-1")?.claims as string);
+    expect(claims.every((c: { provenance: unknown[] }) => c.provenance.length === 0)).toBe(true);
+    expect(claims.every((c: { own_knowledge: boolean }) => c.own_knowledge === true)).toBe(true);
+  });
+
+  it("une prose qui prétend rapporter des sources sans en déclarer reste refusée", async () => {
+    const { db } = setup();
+    startTurn(db, "Que dit le corpus ?");
+    const llm = new ScriptedLlm([
+      { action: "search", query: "mesure" },
+      {
+        action: "answer",
+        answer: { prose: "Les documents affirment tous la meme chose, sans source déclarée." },
+      },
+    ]);
+    const result = await makeService(db, llm).run("conv-1", {
+      messageId: "msg-assistant-1",
+      questionMessageId: "msg-user-1",
+      question: "Que dit le corpus ?",
+      maxSteps: 2,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("reponse_sans_aucune_preuve");
+  });
+
+  /**
+   * Défaut réel du 2026-10-01 (tour « Ca sert a quoi un LLM ? ») : le prompt montre le
+   * format answer **à plat** (prose/citations au niveau racine), la première mouture du
+   * schéma l'exigeait **imbriquée** sous `answer` — le modèle a suivi le prompt (à juste
+   * titre) et le schéma a rejeté la bonne réponse (`sortie_invalide`, 8 fragments trouvés
+   * pour rien). Non-régression : la forme plate du prompt EST le contrat ; la forme
+   * imbriquée est normalisée, l'ancienne sortie `claims` reste acceptée en repli.
+   */
+  it("la sortie answer en forme plate (celle du prompt) est acceptée, imbriquée normalisée", async () => {
+    const { db } = setup();
+    const { conversations } = startTurn(db, "Que dit le corpus de la mesure ?");
+    const llm = new ScriptedLlm([
+      { action: "search", query: "mesure" },
+      {
+        action: "answer",
+        prose:
+          "La mesure experimentale fixe les conditions de l'observation. " +
+          "C'est ce que le corpus montre le plus clairement.",
+        citations: [0],
+      },
+    ]);
+    const result = await makeService(db, llm).run("conv-1", {
+      messageId: "msg-assistant-1",
+      questionMessageId: "msg-user-1",
+      question: "Que dit le corpus de la mesure ?",
+    });
+
+    expect(result.status).toBe("done");
+    const claims = JSON.parse(conversations.getMessage("msg-assistant-1")?.claims as string);
+    expect(claims.length).toBeGreaterThanOrEqual(1);
+    expect(claims[0].provenance.map((p: { kind: string }) => p.kind)).toContain("fragment");
+  });
+
+  it("un reasoning trop long n'annule pas l'action (champ libre, jamais lu)", async () => {
+    const { db } = setup();
+    const { conversations } = startTurn(db, "Que dit le corpus ?");
+    const llm = new ScriptedLlm([
+      { action: "search", query: "mesure" },
+      {
+        action: "answer",
+        prose: "La mesure experimentale fixe les conditions de l'observation du vivant.",
+        citations: [0],
+        reasoning: "x".repeat(12_000),
+      },
+    ]);
+    const result = await makeService(db, llm).run("conv-1", {
+      messageId: "msg-assistant-1",
+      questionMessageId: "msg-user-1",
+      question: "Que dit le corpus ?",
+    });
+
+    expect(result.status).toBe("done");
+    expect(conversations.getMessage("msg-assistant-1")?.text).toContain("mesure");
+  });
+
   it("une question posée sur le corpus entier doit lire avant de répondre", async () => {
     const { db } = setup();
     const { conversations } = startTurn(db, "Que dit le corpus de la mesure ?");

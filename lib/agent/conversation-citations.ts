@@ -81,6 +81,8 @@ export interface VerifiedClaim {
    * sourcée » : l'AC1 l'autorise à exister, jamais à passer pour un fait.
    */
   sourced: boolean;
+  /** Contenu **propre au modèle** (connaissance externe, mise en relation assumée). */
+  own_knowledge?: boolean;
 }
 
 export interface TurnVerdict {
@@ -139,7 +141,15 @@ export function verifyConversationTurn(
     });
     const sourced = provenance.some((p) => p.verified);
     if (!sourced) unsourced += 1;
-    return { text: claim.text, provenance, sourced };
+    // le marqueur du modèle traverse la vérification : c'est un fait **du tour**, pas
+    // un verdict — une affirmation propre au modèle ne devient jamais sourcée, et une
+    // affirmation sourcée ne devient jamais « connaissance du modèle »
+    return {
+      text: claim.text,
+      provenance,
+      sourced,
+      ...(claim.own_knowledge ? { own_knowledge: true } : {}),
+    };
   });
 
   return { claims, unverified, unsourced };

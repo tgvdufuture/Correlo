@@ -38,48 +38,95 @@ const claimSchema = z.object({
   files: z.array(z.number().int().min(0)).max(MAX_CITATIONS_PER_CLAIM).optional(),
 });
 
+/**
+ * Sortie `answer` — révision « prose » (2026-10-01, **forme plate**) : le modèle rend
+ * **un texte continu** (`prose`) et la liste des sources qu'il utilise, pas des
+ * affirmations pré-découpées. Le serveur découpe la prose en phrases et rattache chaque
+ * source par recouvrement lexical (la Phase 4 a mesuré ce que valait la devinette
+ * laissée au modèle : 0,27 de recouvrement sur une clause pourtant correcte — donc le
+ * serveur rattache, le modèle ne fait que déclarer).
+ *
+ * Défaut mesuré en production le jour même : la première mouture imbriquait ces champs
+ * sous une clé `answer`, alors que le prompt montre le format **à plat** — le modèle a
+ * suivi le prompt (à juste titre) et le schéma a rejeté la bonne réponse
+ * (`sortie_invalide`). La forme plate EST le contrat ; la forme imbriquée est
+ * normalisée par le `preprocess` ci-dessous pour ne pas casser les tours persistés.
+ */
 export const CONVERSATION_ACTION_SCHEMA = z
-  .object({
-    action: z.enum([
-      "search",
-      "expand",
-      "ask_web",
-      "answer",
-      "search_web",
-      "read_page",
-      "read_file",
-    ]),
-    /** Requis par `search` et `search_web`. */
-    query: z.string().trim().min(2).max(MAX_WEB_QUERY_CHARS).optional(),
-    /**
-     * Requis par `ask_web` : **pourquoi** le corpus ne suffit pas. Affiché comme entrée de
-     * l'étape, donc borné — c'est un motif, pas un raisonnement (celui-ci vit dans
-     * `reasoning`, qui n'est jamais persisté).
-     */
-    reason: z.string().trim().min(3).max(MAX_WEB_QUERY_CHARS).optional(),
-    /** Requis par `expand` : indice d'une entrée du catalogue. */
-    fragment: z.number().int().min(0).optional(),
-    /** Requis par `read_page` : indice d'un résultat de la recherche web du tour. */
-    result: z.number().int().min(0).optional(),
-    /**
-     * Requis par `read_file` : chemin **dans la racine du workspace** (relatif ou absolu
-     * *dans* la racine — le confinement est appliqué par le serveur après résolution, jamais
-     * par la forme du chemin). Borné : c'est une entrée affichée dans la trace du tour.
-     */
-    path: z.string().trim().min(1).max(400).optional(),
-    /** `read_file` : première ligne lue (1-based). Défaut : 1. */
-    from: z.number().int().min(1).optional(),
-    /** `read_file` : dernière ligne lue (incluse). Défaut : fenêtre de 200 lignes. */
-    to: z.number().int().min(1).optional(),
-    /**
-     * Requis par `answer`. **Le serveur assemble** `messages.text` à partir de ces
-     * affirmations : le modèle ne fournit pas de prose à côté, sinon la provenance
-     * d'une phrase devrait être devinée (mesure Phase 4, §11.3).
-     */
-    claims: z.array(claimSchema).min(1).max(MAX_CLAIMS).optional(),
-    /** Champ libre toléré (raisonnement) : jamais lu, jamais persisté. */
-    reasoning: z.string().max(4_000).optional(),
-  })
+  .preprocess(
+    (raw) => {
+      // `{"action":"answer","answer":{...}}` (forme imbriquée éphémère) → champs à plat.
+      if (raw && typeof raw === "object" && !Array.isArray(raw) && "answer" in raw) {
+        const { answer, ...rest } = raw as Record<string, unknown>;
+        if (answer && typeof answer === "object" && !Array.isArray(answer)) {
+          return { ...(answer as Record<string, unknown>), ...rest };
+        }
+      }
+      return raw;
+    },
+    z.object({
+      action: z.enum([
+        "search",
+        "expand",
+        "ask_web",
+        "answer",
+        "search_web",
+        "read_page",
+        "read_file",
+      ]),
+      /** Requis par `search` et `search_web`. */
+      query: z.string().trim().min(2).max(MAX_WEB_QUERY_CHARS).optional(),
+      /**
+       * Requis par `ask_web` : **pourquoi** le corpus ne suffit pas. Affiché comme entrée de
+       * l'étape, donc borné — c'est un motif, pas un raisonnement (celui-ci vit dans
+       * `reasoning`, qui n'est jamais persisté).
+       */
+      reason: z.string().trim().min(3).max(MAX_WEB_QUERY_CHARS).optional(),
+      /** Requis par `expand` : indice d'une entrée du catalogue. */
+      fragment: z.number().int().min(0).optional(),
+      /** Requis par `read_page` : indice d'un résultat de la recherche web du tour. */
+      result: z.number().int().min(0).optional(),
+      /**
+       * Requis par `read_file` : chemin **dans la racine du workspace** (relatif ou absolu
+       * *dans* la racine — le confinement est appliqué par le serveur après résolution, jamais
+       * par la forme du chemin). Borné : c'est une entrée affichée dans la trace du tour.
+       */
+      path: z.string().trim().min(1).max(400).optional(),
+      /** `read_file` : première ligne lue (1-based). Défaut : 1. */
+      from: z.number().int().min(1).optional(),
+      /** `read_file` : dernière ligne lue (incluse). Défaut : fenêtre de 200 lignes. */
+      to: z.number().int().min(1).optional(),
+      /**
+       * Ancienne sortie `claims`, acceptée comme repli (rattrapage d'un modèle qui
+       * suivrait l'ancien contrat, et tours persistés).
+       */
+      claims: z.array(claimSchema).min(1).max(MAX_CLAIMS).optional(),
+      /** La réponse, telle qu'elle sera lue : un texte continu, pas une liste. */
+      prose: z.string().trim().min(1).max(6_000).optional(),
+      /** Indices de catalogue utilisés par la réponse (le serveur les rattache aux phrases). */
+      citations: z.array(z.number().int().min(0)).max(MAX_CITATIONS_PER_CLAIM).optional(),
+      /** Indices de **résultats web lus** utilisés par la réponse. */
+      web: z.array(z.number().int().min(0)).max(MAX_CITATIONS_PER_CLAIM).optional(),
+      /** Indices de **lectures de fichier réussies** dans ce tour. */
+      files: z.array(z.number().int().min(0)).max(MAX_CITATIONS_PER_CLAIM).optional(),
+      /**
+       * La réponse apporte-t-elle du contenu **propre au modèle** (connaissance externe,
+       * mise en relation) ? Affiché, jamais présenté comme un fait.
+       */
+      own_knowledge: z.boolean().optional(),
+      /**
+       * Champ libre toléré (raisonnement) : jamais lu, jamais persisté. Un dépassement
+       * est **ignoré** (`.catch`), pas rejeté : mesuré sur le tour réel du 2026-10-01,
+       * un modèle qui raisonne longuement dépassait le plafond et faisait tomber TOUTE
+       * l'action en `sortie_invalide` — alors que le champ n'a aucun effet sur le tour.
+       */
+      reasoning: z
+        .string()
+        .max(4_000)
+        .optional()
+        .catch(undefined),
+    })
+  )
   .superRefine((val, ctx) => {
     const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
     const searchLike = val.action === "search" || val.action === "search_web";
@@ -123,8 +170,11 @@ export const CONVERSATION_ACTION_SCHEMA = z
       }
     }
     if (val.action === "answer") {
-      if (!val.claims || val.claims.length === 0) {
-        issue("action answer : claims requises (au moins 1 affirmation)");
+      if (!val.prose && !(val.claims && val.claims.length > 0)) {
+        issue("action answer : prose (ou claims) requis");
+      }
+      if (val.prose && val.claims) {
+        issue("action answer : prose et claims sont exclusifs l'un de l'autre");
       }
       if (
         val.query !== undefined ||
@@ -133,6 +183,20 @@ export const CONVERSATION_ACTION_SCHEMA = z
         val.path !== undefined
       ) {
         issue("action answer : query, fragment, result et path interdits");
+      }
+      if (val.prose) {
+        const citations = val.citations ?? [];
+        if (new Set(citations).size !== citations.length) {
+          issue("action answer : citations dupliquées");
+        }
+        const web = val.web ?? [];
+        if (new Set(web).size !== web.length) {
+          issue("action answer : résultats web dupliqués");
+        }
+        const files = val.files ?? [];
+        if (new Set(files).size !== files.length) {
+          issue("action answer : lectures de fichier dupliquées");
+        }
       }
       for (const claim of val.claims ?? []) {
         const citations = claim.citations ?? [];

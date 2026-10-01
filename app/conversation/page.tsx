@@ -1,3 +1,5 @@
+import { MessageSquare } from "lucide-react";
+import { PageShell } from "@/components/page-shell";
 import { ConversationView } from "@/components/conversation-view";
 import { getDb } from "@/lib/db/client";
 import { createSynthesesRepo } from "@/lib/repositories/syntheses";
@@ -37,18 +39,12 @@ export default async function NewConversationPage({
         } as const);
 
   return (
-    <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-10">
-      <header className="mb-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Conversation</h1>
-        <p className="text-sm text-muted-foreground">
-          Une question, et un agent qui lit le corpus avant de répondre : ses affirmations
-          sont assemblées par le serveur, chacune portant les extraits qui l&apos;appuient.
-          Les citations sont revérifiées à chaque lecture — une preuve qui ne tient plus est
-          affichée comme telle, et une affirmation sans preuve survivante reste « non
-          sourcée ».
-        </p>
-      </header>
+    <PageShell
+      icon={MessageSquare}
+      title="Conversation"
+      subtitle="Une question, et un agent qui lit le corpus avant de répondre : sa prose est assemblée par le serveur, avec les sources regroupées sous la réponse — revérifiées à chaque lecture."
+    >
       <ConversationView conversationId={null} initialAnchor={initialAnchor} />
-    </main>
+    </PageShell>
   );
 }

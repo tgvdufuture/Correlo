@@ -147,7 +147,8 @@ export type AnswerRejection =
   | "reponse_avec_repere_technique"
   | "reponse_web_ignoree"
   | "reponse_sans_aucune_preuve"
-  | "reponse_sans_exploration";
+  | "reponse_sans_exploration"
+  | "reponse_prose_vide";
 
 export const ANSWER_REJECTION_LABEL: Record<AnswerRejection, string> = {
   reponse_hors_catalogue:
@@ -159,6 +160,7 @@ export const ANSWER_REJECTION_LABEL: Record<AnswerRejection, string> = {
     "le serveur a constaté que le corpus ne suffit pas et a exposé les outils web : le tour n'a fait aucune étape web",
   reponse_sans_aucune_preuve: "aucune affirmation appuyée par une preuve",
   reponse_sans_exploration: "réponse sans avoir lu le corpus",
+  reponse_prose_vide: "prose vide (ou un seul fragment recopié) sans contenu rédigé",
 };
 
 /**
@@ -219,6 +221,13 @@ export type ClaimProvenance = FragmentProvenance | WebProvenance | FileProvenanc
 export interface ConversationClaim {
   text: string;
   provenance: ClaimProvenance[];
+  /**
+   * L'affirmation porte-t-elle du contenu **propre au modèle** (connaissance externe,
+   * transition, conséquence logique) — en plus ou en lieu et place des preuves ? Le
+   * serveur la pose à partir du champ `own_knowledge` du modèle ; l'écran l'affiche,
+   * jamais comme un fait (une connaissance du modèle n'est pas une preuve).
+   */
+  own_knowledge?: boolean;
 }
 
 /** La copie d'une page telle qu'elle a été lue pendant le tour (jamais la page vivante). */
@@ -297,6 +306,12 @@ export interface ConversationStep {
   refused?: AnswerRejection;
   /** Trace d'une sortie inexploitable, d'un outil non exposé ou d'un refus réseau. */
   failure?: string;
+  /**
+   * Détail de l'échec, quand le provider le fournit (issues de validation + sortie brute
+   * tronquée) : une étape `invalid` doit pouvoir être diagnostiquée depuis la trace du
+   * tour, au lieu d'être un « sortie_invalide » muet.
+   */
+  reason?: string;
   /**
    * `false` ⇒ l'étape n'a **rien consommé** : outil non exposé, budget épuisé, action
    * redondante (`recherche_deja_faite`, `page_deja_lue`, `resultat_hors_recherche`). Elle

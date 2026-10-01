@@ -146,18 +146,23 @@ function twoSources() {
  * Corpus à **une seule** source : le catalogue ne porte aucune preuve transversale, donc
  * `usableEvidence` vaut 0 — c'est le cas « le corpus ne suffit pas ».
  */
+/**
+ * Corpus **maigre** : un seul fragment non structurel — sous le seuil
+ * `WEB_UNLOCK_MIN_EVIDENCE = 2`, donc « corpus insuffisant » dès qu'une exploration aboutit.
+ * (Avant le 2026-10-01, cette fixture portait 4 fragments d'une seule source : le critère
+ * de suffisance exigeait alors deux sources. Désormais une source fournie suffit à répondre,
+ * donc un corpus « insuffisant » doit être réellement maigre.)
+ */
 function oneSource() {
   const { db } = makeTestDb();
   const s1 = makeTextSource(db, "s1", "Claude Bernard");
-  for (let i = 0; i < 4; i++) {
-    makeFragment(db, {
-      sourceId: s1,
-      chunkIndex: i,
-      id: `frag-${i}`,
-      text: `La mesure experimentale numero ${i} fixe les conditions de l'observation.`,
-      vector: V(1, i * 0.1),
-    });
-  }
+  makeFragment(db, {
+    sourceId: s1,
+    chunkIndex: 0,
+    id: "frag-0",
+    text: "La mesure experimentale fixe les conditions de l'observation.",
+    vector: V(1, 0),
+  });
   return { db, s1 };
 }
 
@@ -240,7 +245,7 @@ function turnOf(db: ReturnType<typeof makeTestDb>["db"], messageId = "msg-assist
 }
 
 describe("la règle de déverrouillage (constat serveur)", () => {
-  it("compte les fragments utilisables : non structurels et de deux sources distinctes", () => {
+  it("compte les fragments utilisables : non structurels, toutes sources confondues (2026-10-01)", () => {
     const two = twoSources();
     const entries = [
       { source_id: two.s1, text: "Le doute methodique ecarte les opinions probables.", locator: "[0,10)" },
@@ -248,8 +253,16 @@ describe("la règle de déverrouillage (constat serveur)", () => {
     ].map((e, i) => ({ ...e, index: i, fragment_id: `f${i}`, chunk_index: 0, source_title: null, origin: "seed" as const }));
     expect(usableEvidence(entries)).toBe(2);
 
-    // une seule source : aucune preuve transversale, donc rien d'utilisable
-    expect(usableEvidence([entries[0]])).toBe(0);
+    // une seule source bien fournie SUFFIT à répondre (défaut réel du 2026-10-01 : 8
+    // fragments d'un document unique déclarés « insuffisants » avaient poussé le tour
+    // vers le web) — le critère est la masse, plus la transversalité
+    expect(
+      usableEvidence([
+        entries[0],
+        { ...entries[1], source_id: two.s1, fragment_id: "f2" },
+        { ...entries[1], source_id: two.s1, fragment_id: "f3" },
+      ])
+    ).toBe(3);
     // l'appareil (sommaire, index, notes) n'est pas une preuve — constat 5A
     const apparatus = [
       { ...entries[0], text: "TABLE DES MATIERES\nChapitre I .... 1\nChapitre II .... 15\nChapitre III .... 42\nChapitre IV .... 88", locator: "#TABLE DES MATIERES" },

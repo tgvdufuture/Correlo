@@ -29,6 +29,7 @@ import {
   WORKSPACE_PROBLEM_LABEL,
   WORKSPACE_REFUSAL_LABEL,
   type ClaimProvenanceView,
+  type ConversationClaimView,
   type ConversationMessageView,
   type ConversationRunView,
   type ConversationSummary,
@@ -405,38 +406,108 @@ function MessageView({ message }: { message: ConversationMessageView }) {
           </p>
         ) : null}
 
-        {message.claims.length > 0 ? (
-          <ol className="flex flex-col gap-3">
-            {message.claims.map((claim, i) => (
-              <li key={i} className="flex flex-col gap-1.5">
-                <p className="flex flex-wrap items-baseline gap-1.5 text-sm">
-                  {claim.text}
-                  {claim.sourced ? null : (
-                    <Badge variant="outline" title="Aucune preuve survivante : à ne pas traiter comme un fait">
-                      non sourcée
-                    </Badge>
-                  )}
-                </p>
-                {claim.provenance.length > 0 ? (
-                  <ul className="flex flex-col gap-1.5 border-l-2 border-border pl-3">
-                    {claim.provenance.map((p) => (
-                      <ProvenanceView key={`${p.kind}-${p.index}`} provenance={p} />
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-xs text-muted-foreground">
-                    Aucune preuve citée pour cette affirmation — elle est affichée comme non
-                    sourcée, jamais comme un fait.
-                  </p>
-                )}
-              </li>
-            ))}
-          </ol>
-        ) : null}
+        {message.claims.length > 0 ? <AnswerProse claims={message.claims} /> : null}
 
         {message.run ? <RunView run={message.run} /> : null}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * La réponse **en continu**, et les sources **à la fin** — jamais au fil du texte.
+ *
+ * L'ancien rendu intercalait les cartes de provenance entre les phrases : la réponse se
+ * lisait comme une liste annotée, pas comme un texte. Le style académique règle ça — un
+ * renvoi numéroté par phrase, le bloc de sources dédupliqué et regroupé après le texte :
+ * la lecture est continue, la traçabilité intacte.
+ *
+ * La déduplication est nécessaire parce que le serveur rattache **par phrase** : trois
+ * phrases appuyées sur le même fragment répèteraient trois fois la même source. Chaque
+ * source apparaît une fois, numérotée à la première occurrence ; un renvoi de phrase
+ * pointe vers ces numéros. Une phrase sans provenance survivante reste signalée (✱/·) —
+ * l'honnêteté de l'affichage n'est pas négociable, seule sa place change.
+ */
+function AnswerProse({ claims }: { claims: ConversationClaimView[] }) {
+  const numbered: { claim: ConversationClaimView; marks: number[] }[] = [];
+  const registry = new Map<string, number>();
+  let next = 1;
+  for (const claim of claims) {
+    const marks: number[] = [];
+    for (const p of claim.provenance) {
+      const key = `${p.kind}-${p.index}`;
+      let n = registry.get(key);
+      if (n === undefined) {
+        n = next++;
+        registry.set(key, n);
+      }
+      marks.push(n);
+    }
+    numbered.push({ claim, marks });
+  }
+  const sources = [...registry.entries()]
+    .sort((a, b) => a[1] - b[1])
+    .map(([key, n]) => ({
+      n,
+      provenance: claims
+        .flatMap((c) => c.provenance)
+        .find((p) => `${p.kind}-${p.index}` === key) as ClaimProvenanceView,
+    }));
+  const hasOwnKnowledge = claims.some((c) => c.own_knowledge);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <p className="text-sm leading-relaxed whitespace-pre-wrap">
+        {numbered.map(({ claim, marks }, i) => (
+          <span key={i}>
+            {" "}
+            {claim.text}
+            {marks.length > 0 ? (
+              <sup className="ml-0.5 text-[0.65rem] font-medium text-primary">
+                [{marks.join(",")}]
+              </sup>
+            ) : null}
+            {claim.own_knowledge ? (
+              <sup
+                className="ml-0.5 text-[0.65rem] font-medium text-amber-600 dark:text-amber-500"
+                title="Connaissance du modèle, hors corpus : à vérifier avant de la traiter comme un fait"
+              >
+                ✱
+              </sup>
+            ) : null}
+            {claim.sourced || claim.own_knowledge ? null : (
+              <sup
+                className="ml-0.5 text-[0.65rem] font-medium text-muted-foreground"
+                title="Aucune preuve survivante : à ne pas traiter comme un fait"
+              >
+                ·
+              </sup>
+            )}
+          </span>
+        ))}
+      </p>
+      {hasOwnKnowledge ? (
+        <p className="text-xs text-amber-600 dark:text-amber-500">
+          ✱ passage marqué de la connaissance propre du modèle, hors corpus — à vérifier avant
+          de le traiter comme un fait.
+        </p>
+      ) : null}
+      {sources.length > 0 ? (
+        <div className="flex flex-col gap-2 border-t border-border pt-3">
+          <p className="text-xs font-medium text-muted-foreground">Sources</p>
+          <ol className="flex flex-col gap-1.5">
+            {sources.map(({ n, provenance }) => (
+              <li key={n} className="flex gap-2">
+                <span className="text-xs font-medium text-primary">[{n}]</span>
+                <div className="min-w-0 flex-1">
+                  <ProvenanceView provenance={provenance} />
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

@@ -73,18 +73,22 @@ class ScriptedLlm implements LlmProvider {
  * Corpus à **une seule** source : `usableEvidence` vaut 0, donc le serveur juge le corpus
  * insuffisant et expose le web dès qu'une exploration a abouti (§13.4).
  */
+/**
+ * Corpus **maigre** (1 fragment, sous `WEB_UNLOCK_MIN_EVIDENCE = 2`) : c'est lui qui
+ * déclenche le constat « corpus insuffisant ». (Avant le 2026-10-01, la fixture portait
+ * 4 fragments : le critère exigeait deux sources ; désormais une source fournie suffit
+ * à répondre, donc « insuffisant » veut dire réellement maigre.)
+ */
 function singleSourceCorpus() {
   const { db } = makeTestDb();
   const s1 = makeTextSource(db, "s1", "Claude Bernard");
-  for (let i = 0; i < 4; i++) {
-    makeFragment(db, {
-      sourceId: s1,
-      chunkIndex: i,
-      id: `frag-${i}`,
-      text: `La mesure experimentale numero ${i} fixe les conditions de l'observation.`,
-      vector: V(1, i * 0.1),
-    });
-  }
+  makeFragment(db, {
+    sourceId: s1,
+    chunkIndex: 0,
+    id: "frag-0",
+    text: "La mesure experimentale fixe les conditions de l'observation.",
+    vector: V(1, 0),
+  });
   return { db };
 }
 
@@ -533,9 +537,9 @@ describe("le workspace et les règles de lecture du corpus", () => {
     const otherLlm = new ScriptedLlm([
       { action: "search", query: "mesure" },
       { action: "read_file", path: "notes.md", from: 2, to: 3 },
-      { action: "answer", claims: [{ text: "La mesure fixe les conditions.", citations: [1] }] },
+      { action: "answer", claims: [{ text: "La mesure fixe les conditions.", citations: [0] }] },
       { action: "search_web", query: "protocoles" },
-      { action: "answer", claims: [{ text: "La mesure fixe les conditions.", citations: [1] }] },
+      { action: "answer", claims: [{ text: "La mesure fixe les conditions.", citations: [0] }] },
     ]);
     const second = await makeService(other, otherLlm, createWorkspace(root), webTools(new FakeSearch())).run("conv-1", {
       messageId: "msg-assistant-1",

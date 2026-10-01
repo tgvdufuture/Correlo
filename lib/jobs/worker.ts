@@ -7,6 +7,7 @@ import {
   isGroqKeyMissing,
   embeddingMeta,
 } from "@/lib/llm/llm";
+import { decodeEmbedding } from "@/lib/llm/embedding-codec";
 import { createSourcesRepo } from "@/lib/repositories/sources";
 import { createFragmentsRepo } from "@/lib/repositories/fragments";
 import { backoffDelayMs, MAX_ATTEMPTS, type ClaimedJob, type JobsRepo, createJobsRepo } from "@/lib/repositories/jobs";
@@ -772,6 +773,12 @@ export function createWorker(): Worker {
     promptCache,
     web: webTools,
     workspace,
+    // Recherche sémantique des tours : le même embedder que l'ingestion, donc le même
+    // espace vectoriel que les fragments — la cosine de la requête est comparable.
+    embedQuery: async (text) => {
+      const buf = await embedder.embed(text);
+      return Array.from(decodeEmbedding(buf, embeddingMeta().dimensions));
+    },
   });
   // Re-vectorisation : le worker porte le même `embedder` que l'ingestion, donc la
   // bascule se fait dans l'espace exact que les prochains dépôts utiliseront.

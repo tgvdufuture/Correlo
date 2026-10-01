@@ -1,3 +1,5 @@
+import { MessageSquare } from "lucide-react";
+import { PageShell } from "@/components/page-shell";
 import { ConversationView } from "@/components/conversation-view";
 
 /**
@@ -14,17 +16,15 @@ import { ConversationView } from "@/components/conversation-view";
 export default async function ConversationPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   return (
-    <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-10">
-      <header className="mb-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Conversation</h1>
-        <p className="text-sm text-muted-foreground">
-          Chaque affirmation porte ses preuves, revérifiées contre le corpus à cette lecture.
-        </p>
-      </header>
+    <PageShell
+      icon={MessageSquare}
+      title="Conversation"
+      subtitle="Chaque affirmation porte ses preuves, revérifiées contre le corpus à cette lecture."
+    >
       <ConversationView
         conversationId={id}
         initialAnchor={{ kind: "corpus", ref: null, label: null }}
       />
-    </main>
+    </PageShell>
   );
 }

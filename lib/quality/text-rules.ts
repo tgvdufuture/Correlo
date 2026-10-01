@@ -92,6 +92,13 @@ const PLACEHOLDER_PATTERNS = [
 const CATALOGUE_REFERENCE_PATTERNS = [
   /\[\s*\d+\s*\]/, // « le fragment [0] affirme que… », « voir [12] »
   /\b(?:fragments?|extraits?|passages?|documents?)\s+(?:n[°o]\s*)?\d+\b/i, // « le fragment 2 », « document n°3 »
+  // indices web du tour (« W0 », « W3 ») : mesuré en réel (2026-10-01, « Selon l'étude
+  // W0… ») — l'utilisateur ne sait pas ce qu'est W0, et le tour suivant part chercher
+  // sur le web la signification de la propre citation du modèle. La prose nomme la
+  // page (son titre, son éditeur), jamais son indice.
+  /\bW\s?\d+\b/,
+  // indices de lecture workspace (« F0 ») — même statut que W
+  /\bF\s?\d+\b/,
 ];
 
 /**

@@ -4,10 +4,11 @@ import { LlmOutputError } from "@/lib/llm/errors";
 import { MAX_PROVIDER_ATTEMPTS, providerRetryDelayMs } from "@/lib/llm/retry";
 import { assertSingleEmbeddingSpace } from "@/lib/llm/embedding-space";
 import type { LlmProvider, PromptCache } from "@/lib/llm/types";
-import { buildCorpusIndex, type CorpusIndex, type IndexedFragment } from "@/lib/agent/retrieval";
+import { buildCorpusIndex, interleave, type CorpusIndex, type IndexedFragment, type QueryEmbedder } from "@/lib/agent/retrieval";
 import { toCatalogueEntry } from "@/lib/agent/citations";
 import { looksStructural } from "@/lib/synth/select";
 import { mentionsProtocolReference } from "@/lib/quality/text-rules";
+import { contentWords, stemOf } from "@/lib/quality/lexical-anchor";
 import { WebRefusalError } from "@/lib/agent/web-guard";
 import {
   WorkspaceRefusalError,
@@ -176,6 +177,12 @@ export class ConversationService {
       /** Index du corpus déjà construit (tests) — sinon il est construit par le run. */
       index?: CorpusIndex;
       /**
+       * Encodeur de **requête** pour la recherche sémantique (Ollama local — aucune donnée
+       * ne sort de la machine, G3). Absent ⇒ `search` reste purement lexical (comportement
+       * des phases 4/6 précédentes, et voie des tests sans réseau).
+       */
+      embedQuery?: QueryEmbedder;
+      /**
        * Outils web (§13.4). Absents ⇒ le tour est **entièrement hors ligne** : c'est le
        * défaut, et un tour sans web est complet (AC5′ : 0 étape web).
        */
@@ -200,7 +207,8 @@ export class ConversationService {
     // risque est réel — `dotProduct` lit `dims` valeurs, donc un corpus mixte produirait
     // des voisinages faux mais plausibles.
     assertSingleEmbeddingSpace(this.deps.db, [], `conversation ${opts.messageId}`);
-    const index = this.deps.index ?? buildCorpusIndex(this.deps.db);
+    const index =
+      this.deps.index ?? buildCorpusIndex(this.deps.db, { embedQuery: this.deps.embedQuery });
 
     const budget = Math.min(opts.maxSteps ?? CONVERSATION_STEP_BUDGET, CONVERSATION_STEP_BUDGET);
     const pageSize = opts.pageSize ?? DEFAULT_AGENT_PAGE_SIZE;
@@ -375,7 +383,9 @@ export class ConversationService {
         } catch (e) {
           if (e instanceof LlmOutputError) {
             // sortie inexploitable après le retry de correction : la trace est écrite
-            // (étape `invalid`), un échec silencieux serait pire
+            // (étape `invalid`), un échec silencieux serait pire. Le message de l'erreur
+            // porte les issues de validation et la sortie brute tronquée (300 car.) —
+            // le garder rend l'échec diagnostiquable depuis la trace, au lieu de deviner.
             doc.steps.push({
               index: stepIndex,
               action: "invalid",
@@ -384,6 +394,7 @@ export class ConversationService {
               added: [],
               observation: [],
               failure: "sortie_invalide",
+              reason: e.message.slice(0, 500),
               // rien n'a été exécuté : l'étape est tracée, elle n'est pas facturée
               charged: false,
             });
@@ -396,8 +407,15 @@ export class ConversationService {
       }
 
       const known = new Set(doc.catalogue.map((e) => e.fragment_id));
+      // Le raisonnement est une liberté du modèle, pas une entrée bornée : un modèle qui
+      // réfléchit longuement dépasse le plafond du champ libre et faisait rejeter TOUTE
+      // l'action — mesuré sur le tour réel du 2026-10-01 (« Ca sert a quoi un LLM ? »,
+      // 2 recherches réussies, puis `sortie_invalide` sur un dépassement de 4 000 car.).
+      // Tronquer ici plutôt que valider strictement : ce champ n'est jamais lu ni persisté.
+      if (action.reasoning && action.reasoning.length > 4_000) action.reasoning = action.reasoning.slice(0, 4_000);
       const outcome = await applyAction(action, {
         index,
+        embedQuery: this.deps.embedQuery,
         stepIndex,
         pageSize,
         catalogueSize,
@@ -674,13 +692,19 @@ export class ConversationService {
 
 /**
  * Fragments **utilisables** d'un catalogue (§13.4) : non structurels (un sommaire n'est pas
- * une preuve — constat 5A, `looksStructural`) et appartenant à au moins **deux sources
- * distinctes** : la transversalité est la valeur du produit, un stock mono-document ne
- * répond pas à la question que la conversation pose.
+ * une preuve — constat 5A, `looksStructural`).
+ *
+ * La transversalité (≥ 2 sources) reste la valeur du produit pour les **suggestions** —
+ * mais pour répondre à une question, une source unique bien fournie **suffit** : mesuré
+ * en réel (2026-10-01, « Ca sert a quoi un LLM ? »), 8 fragments pertinents d'UN document
+ * (« Grand modèle de langage ») étaient sous les yeux du modèle, le serveur déclarait
+ * « corpus insuffisant » parce qu'ils ne venaient pas de 2 sources, et le tour allait
+ * chercher sur le web ce que le corpus tenait — deux refus `reponse_web_ignoree` avant
+ * que le modèle n'obéisse. Le critère de suffisance devient donc la **masse** de preuves
+ * utilisables, plus le nombre de sources qui les portent.
  */
 export function usableEvidence(catalogue: CatalogueEntry[]): number {
   const pool = catalogue.filter((e) => !looksStructural(e.text, e.locator));
-  if (new Set(pool.map((e) => e.source_id)).size < 2) return 0;
   return pool.length;
 }
 
@@ -763,6 +787,8 @@ export function usableEvidence(catalogue: CatalogueEntry[]): number {
 /** Ce qu'une action a le droit de lire et d'écrire dans le tour en cours. */
 interface ActionContext {
   index: CorpusIndex;
+  /** Encodeur de requête pour la moitié sémantique du `search` (absent en tests). */
+  embedQuery?: QueryEmbedder;
   stepIndex: number;
   pageSize: number;
   catalogueSize: number;
@@ -775,6 +801,172 @@ interface ActionContext {
   internalBudget: number;
   /** Plafond des explorations (`budget − 1`) : la réponse garde sa place. */
   explorationBudget: number;
+}
+
+/**
+ * Découpe une **prose** en phrases et rattache à chaque phrase les sources déclarées qui
+ * la recouvrent — **le serveur rattache, jamais le modèle** (mesure Phase 4, §11.3 : la
+ * devinette laissée au modèle valait 0,27 de recouvrement sur une clause pourtant
+ * correcte). Le recouvrement est lexical et asymétrique : une phrase « appuyée » par une
+ * source si ses mots de contenu apparaissent dans la source — pas l'inverse, sinon une
+ * phrase qui résume tout le fragment sans en partager les mots serait crue sourcée.
+ *
+ * Une phrase sans source reçue : les sources **de la réponse entière** si elle en a (une
+ * phrase de transition au milieu d'une réponse sourcée n'est pas « non sourcée » pour
+ * autant), sinon le marqueur `own_knowledge` du modèle. Ce n'est pas le jugement qu'une
+ * phrase *implique* la source : c'est le rattachement de ce qui a été déclaré utilisé,
+ * vérifiable en relisant la copie affichée.
+ */
+function claimsFromProse(
+  answer: ConversationActionOutput,
+  ctx: ActionContext
+): ConversationClaim[] {
+  const sentences = splitSentences(answer.prose ?? "");
+  if (sentences.length === 0) return [];
+
+  // Racines des sources déclarées, calculées une fois : le rattachement ne doit pas
+  // re-tokeniser chaque fragment par phrase.
+  const fragmentSources = (answer.citations ?? []).map((i) => {
+    const entry = ctx.catalogue.find((e) => e.index === i) as CatalogueEntry;
+    return { entry, stems: contentStems(entry.text) };
+  });
+  const webSources = (answer.web ?? []).map((i) => {
+    const result = ctx.web.results.find((r) => r.index === i) as WebResult;
+    return { result, stems: contentStems(result.text ?? "") };
+  });
+  const fileSources = (answer.files ?? []).map((i) => {
+    const read = ctx.workspace.reads.find((r) => r.index === i) as WorkspaceRead;
+    return { read, stems: contentStems(read.text ?? "") };
+  });
+
+  const claims: ConversationClaim[] = [];
+  for (const sentence of sentences) {
+    const words = contentStems(sentence);
+    const attached: ClaimProvenance[] = [];
+    for (const fs of fragmentSources) {
+      if (coversSentence(fs.stems, words)) {
+        const entry = fs.entry;
+        attached.push({
+          kind: "fragment",
+          index: entry.index,
+          fragment_id: entry.fragment_id,
+          source_id: entry.source_id,
+          source_title: entry.source_title,
+          locator: entry.locator,
+          text: entry.text,
+        });
+      }
+    }
+    for (const ws of webSources) {
+      if (coversSentence(ws.stems, words)) {
+        const result = ws.result;
+        attached.push({
+          kind: "url",
+          index: result.index,
+          url: result.url,
+          title: result.title,
+          retrieved_at: result.retrieved_at as string,
+          excerpt: webExcerpt(result.text ?? ""),
+        });
+      }
+    }
+    for (const fs of fileSources) {
+      if (coversSentence(fs.stems, words)) {
+        const read = fs.read;
+        attached.push({
+          kind: "file",
+          index: read.index,
+          path: read.path,
+          from_line: read.from_line,
+          to_line: read.to_line,
+          read_at: read.read_at,
+          excerpt: workspaceExcerpt(read.text ?? ""),
+        });
+      }
+    }
+    // Une phrase sans rattachement direct est une phrase que le modèle **assume** :
+    // transition, reformulation, connaissance externe. Elle porte le marqueur — l'écran
+    // dit « connaissance du modèle » au lieu de la présenter comme sourcée. On n'hérite
+    // PAS des sources déclarées : coller un fragment à une phrase qui n'en partage aucun
+    // mot recrée exactement la fausse provenance que la mesure Phase 4 a condamnée.
+    const ownKnowledge = attached.length === 0 || answer.own_knowledge === true;
+    claims.push({
+      text: sentence,
+      ...(ownKnowledge ? { own_knowledge: true } : {}),
+      provenance: attached,
+    });
+  }
+  return claims;
+}
+
+/**
+ * Racines de contenu d'un texte, **plus ses nombres** (normalisés : « 2,4 » → « 24 »,
+ * « 15 % » → « 15 »). Une page web lue est souvent en anglais quand la prose est en
+ * français (mesuré : arxiv 2405.21015 lu, prose rédigée en français) — les racines ne
+ * traversent pas la langue (« coût » vs « cost »), mais les chiffres si : années,
+ * pourcentages et facteurs sont les ancres les plus précises d'un rattachement.
+ */
+function contentStems(text: string): Set<string> {
+  const stems = new Set(contentWords(text).map(stemOf));
+  for (const m of text.matchAll(/\d+(?:[.,]\d+)?/g)) {
+    const digits = m[0].replace(/\D/g, "");
+    if (digits.length >= 2) stems.add(`#${digits}`);
+  }
+  return stems;
+}
+
+/**
+ * La source recouvre-t-elle la phrase ? Asymétrique : assez de mots de la phrase doivent
+ * se retrouver dans la source. Deux voies :
+ *  - recouvrement lexical ≥ 0,30 — abaissé de 0,34 : une prose française appuyée sur une
+ *    source anglaise perd des racines à la traduction (« modèle » vs « model » tombe, mais
+ *    « salaires » vs « salaries » rate à une lettre) ; mesuré sur le tour réel du
+ *    2026-10-01, 33 % de recouvrement réel était refusé et la claim finissait étiquetée
+ *    « connaissance du modèle » alors qu'elle venait de la page lue ;
+ *  - ancre numérique : un nombre partagé (année, pourcentage, facteur) et ≥ 0,15 de
+ *    recouvrement — un chiffre est quasi-unique, il porte le rattachement à lui seul.
+ */
+function coversSentence(sourceStems: Set<string>, sentenceStems: Set<string>): boolean {
+  if (sentenceStems.size === 0) return false;
+  let hit = 0;
+  let sharedNumbers = false;
+  for (const s of sentenceStems) {
+    if (!sourceStems.has(s)) continue;
+    hit += 1;
+    if (s.startsWith("#")) sharedNumbers = true;
+  }
+  const coverage = hit / sentenceStems.size;
+  return coverage >= 0.3 || (sharedNumbers && coverage >= 0.15);
+}
+
+/**
+ * Découpage en phrases : frontières `.!?` suivies d'un espace et d'une majuscule ou d'un
+ * guillemet ouvrant, plus la fin de texte. Une troncature de provider peut casser une
+ * phrase — elle est conservée telle quelle : c'est du texte affiché, pas du JSON.
+ */
+function splitSentences(prose: string): string[] {
+  const text = prose.replace(/\s+/g, " ").trim();
+  if (!text) return [];
+  const out: string[] = [];
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "." || ch === "!" || ch === "?") {
+      const next = text[i + 1];
+      const after = text[i + 2];
+      if (
+        (next === " " && (after === undefined || /[A-ZÀ-ÖØ-Þ"«\d]/.test(after))) ||
+        next === undefined
+      ) {
+        const s = text.slice(start, i + 1).trim();
+        if (s) out.push(s);
+        start = i + 1;
+      }
+    }
+  }
+  const tail = text.slice(start).trim();
+  if (tail) out.push(tail);
+  return out;
 }
 
 async function applyAction(
@@ -828,7 +1020,16 @@ async function applyAction(
       }
       candidates = index.neighbours(base.fragment_id, pageSize * 2);
     } else {
-      candidates = index.search(action.query ?? "", pageSize * 2);
+      // Hybride (décision du 2026-10-01) : la moitié lexicale seule était aveugle aux
+      // synonymes — « LLM » ne trouvait pas un corpus qui écrit « modèle de langage ».
+      // La requête est encodée par le connecteur **local** (G3) et la moitié sémantique
+      // est intercalée par rang derrière la lexicale ; sans encodeur (tests), le `search`
+      // garde exactement le comportement lexical des phases 4/6.
+      const lexical = index.search(action.query ?? "", pageSize * 2);
+      const semantic = ctx.embedQuery
+        ? await index.semanticSearch(action.query ?? "", pageSize * 2)
+        : [];
+      candidates = interleave(lexical, semantic, pageSize * 2);
     }
 
     const room = Math.max(0, catalogueSize - catalogue.length);
@@ -941,9 +1142,13 @@ async function applyAction(
   // « la réponse s'appuie sur un document lu pendant ce tour », et un fichier du workspace
   // en est un. Un fichier lu mais non cité ne dispense de rien — sinon n'importe quelle
   // lecture décorative blanchirait une réponse rendue à partir de rien.
-  const readBeforeAnswer = raw.some((c) =>
-    (c.files ?? []).some((i) => ctx.workspace.reads.some((r) => r.index === i && !r.failure))
-  );
+  const readBeforeAnswer =
+    raw.some((c) =>
+      (c.files ?? []).some((i) => ctx.workspace.reads.some((r) => r.index === i && !r.failure))
+    ) ||
+    (action.files ?? []).some((i) =>
+      ctx.workspace.reads.some((r) => r.index === i && !r.failure)
+    );
   const explored = priorSteps.some(
     (s) => (s.action === "search" || s.action === "expand") && !s.failure
   );
@@ -963,15 +1168,21 @@ async function applyAction(
     ...raw
       .flatMap((c) => c.files ?? [])
       .filter((i) => !ctx.workspace.reads.some((r) => r.index === i && !r.failure)),
+    ...(action.citations ?? []).filter((i) => !catalogue.some((e) => e.index === i)),
+    ...(action.web ?? []).filter((i) => !ctx.web.results.some((r) => r.index === i)),
+    ...(action.files ?? []).filter(
+      (i) => !ctx.workspace.reads.some((r) => r.index === i && !r.failure)
+    ),
   ];
   if (unknown.length > 0) {
     step.refused = "reponse_hors_catalogue";
     return { step };
   }
 
-  const unread = raw
-    .flatMap((c) => c.web ?? [])
-    .filter((i) => !ctx.web.results.find((r) => r.index === i)?.read);
+  const unread = [
+    ...raw.flatMap((c) => c.web ?? []),
+    ...(action.web ?? []),
+  ].filter((i) => !ctx.web.results.find((r) => r.index === i)?.read);
   if (unread.length > 0) {
     step.refused = "reponse_web_non_lue";
     return { step };
@@ -979,7 +1190,10 @@ async function applyAction(
 
   // la prose parle du protocole (« le fragment [0] affirme que… ») : elle est réécrite ou
   // refusée, jamais affichée telle quelle — `messages.text` est l'union de ces textes
-  if (raw.some((c) => mentionsProtocolReference(c.text ?? ""))) {
+  if (
+    raw.some((c) => mentionsProtocolReference(c.text ?? "")) ||
+    (action.prose ? mentionsProtocolReference(action.prose) : false)
+  ) {
     step.refused = "reponse_avec_repere_technique";
     return { step };
   }
@@ -1003,54 +1217,68 @@ async function applyAction(
     return { step };
   }
 
-  const claims: ConversationClaim[] = raw.map((c) => ({
-    text: c.text.trim(),
-    provenance: [
-      ...(c.citations ?? []).map((i) => {
-        const entry = catalogue.find((e) => e.index === i) as CatalogueEntry;
-        const provenance: ClaimProvenance = {
-          kind: "fragment",
-          index: entry.index,
-          fragment_id: entry.fragment_id,
-          source_id: entry.source_id,
-          source_title: entry.source_title,
-          locator: entry.locator,
-          text: entry.text,
-        };
-        return provenance;
-      }),
-      ...(c.web ?? []).map((i) => {
-        const result = ctx.web.results.find((r) => r.index === i) as WebResult;
-        const provenance: ClaimProvenance = {
-          kind: "url",
-          index: result.index,
-          url: result.url,
-          title: result.title,
-          // `read` est vrai : la lecture a eu lieu, donc la date et la copie existent
-          retrieved_at: result.retrieved_at as string,
-          excerpt: webExcerpt(result.text ?? ""),
-        };
-        return provenance;
-      }),
-      ...(c.files ?? []).map((i) => {
-        const read = ctx.workspace.reads.find((r) => r.index === i) as WorkspaceRead;
-        const provenance: ClaimProvenance = {
-          kind: "file",
-          index: read.index,
-          path: read.path,
-          from_line: read.from_line,
-          to_line: read.to_line,
-          read_at: read.read_at,
-          // la copie conservée est celle du **serveur**, jamais un extrait recopié par le
-          // modèle : c'est ce qui rend la relecture possible
-          excerpt: workspaceExcerpt(read.text ?? ""),
-        };
-        return provenance;
-      }),
-    ],
-  }));
+  // Deux contrats en parallèle (révision du 2026-10-01) : la sortie **prose** ("answer")
+  // est découpée par le serveur et chaque phrase reçoit les sources déclarées qui la
+  // recouvrent ; l'ancienne sortie **claims** reste acceptée telle quelle (rattrapage d'un
+  // modèle qui suivrait l'ancien contrat, et tours persistés).
+  const claims: ConversationClaim[] = action.prose
+    ? claimsFromProse(action, ctx)
+    : raw.map((c) => ({
+        text: c.text.trim(),
+        own_knowledge: c.citations?.length || c.web?.length || c.files?.length ? undefined : true,
+        provenance: [
+          ...(c.citations ?? []).map((i) => {
+            const entry = catalogue.find((e) => e.index === i) as CatalogueEntry;
+            const provenance: ClaimProvenance = {
+              kind: "fragment",
+              index: entry.index,
+              fragment_id: entry.fragment_id,
+              source_id: entry.source_id,
+              source_title: entry.source_title,
+              locator: entry.locator,
+              text: entry.text,
+            };
+            return provenance;
+          }),
+          ...(c.web ?? []).map((i) => {
+            const result = ctx.web.results.find((r) => r.index === i) as WebResult;
+            const provenance: ClaimProvenance = {
+              kind: "url",
+              index: result.index,
+              url: result.url,
+              title: result.title,
+              // `read` est vrai : la lecture a eu lieu, donc la date et la copie existent
+              retrieved_at: result.retrieved_at as string,
+              excerpt: webExcerpt(result.text ?? ""),
+            };
+            return provenance;
+          }),
+          ...(c.files ?? []).map((i) => {
+            const read = ctx.workspace.reads.find((r) => r.index === i) as WorkspaceRead;
+            const provenance: ClaimProvenance = {
+              kind: "file",
+              index: read.index,
+              path: read.path,
+              from_line: read.from_line,
+              to_line: read.to_line,
+              read_at: read.read_at,
+              // la copie conservée est celle du **serveur**, jamais un extrait recopié par le
+              // modèle : c'est ce qui rend la relecture possible
+              excerpt: workspaceExcerpt(read.text ?? ""),
+            };
+            return provenance;
+          }),
+        ],
+      }));
 
-  if (claims.every((c) => c.provenance.length === 0)) {
+  // Une réponse dont **aucune** affirmation n'est appuyée reste recevable **si** le modèle
+  // assume son contenu comme connaissance propre (own_knowledge) : c'est le contrat v9 —
+  // l'utilisateur a demandé ce que le modèle en pense, pas une radiographie du corpus.
+  // Ce qui reste refusé : une réponse qui prétend rapporter des sources et n'en a aucune.
+  if (
+    claims.every((c) => c.provenance.length === 0) &&
+    !(action.own_knowledge === true)
+  ) {
     step.refused = "reponse_sans_aucune_preuve";
     return { step };
   }

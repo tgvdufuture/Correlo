@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { makeFragment, makeTestDb, makeTextSource } from "./helpers";
-import { buildCorpusIndex } from "@/lib/agent/retrieval";
+import { buildCorpusIndex, interleave, type IndexedFragment } from "@/lib/agent/retrieval";
 import { buildInvestigationPrompt } from "@/lib/agent/prompts";
 import { INVESTIGATION_ACTION_SCHEMA } from "@/lib/agent/schema";
 import type { CatalogueEntry } from "@/lib/agent/types";
@@ -65,6 +65,56 @@ describe("index local du corpus (outils de l'agent)", () => {
     expect(index.search("methode experimentale", 3).map((f) => f.id)).toEqual(found);
     // requête sans terme de contenu : aucun résultat, jamais tout le corpus
     expect(index.search("de la", 3)).toEqual([]);
+  });
+
+  /**
+   * Recherche sémantique (décision du 2026-10-01) : la requête est encodée par le
+   * connecteur local et ordonnée par cosine. Le corpus de test dit « modèle de langage »
+   * — une requête « LLM » ne partage aucun mot, donc la lexicale ne rend rien : c'est
+   * exactement l'angle mort que la sémantique comble. Sans encodeur, `semanticSearch`
+   * est vide (comportement des phases 4/6, et voie des tests sans réseau).
+   */
+  it("recherche sémantique : trouve par le sens quand les mots manquent, vide sans encodeur", async () => {
+    const { db } = makeTestDb();
+    const s1 = makeTextSource(db, "s1", "IA");
+    makeFragment(db, {
+      sourceId: s1,
+      id: "frag-llm-fr",
+      text: "Les modeles de langage predisent le mot suivant d'une sequence.",
+      vector: [1, 0, 0, 0, 0, 0, 0, 0],
+    });
+    const embedQuery = async (): Promise<number[]> => [1, 0, 0, 0, 0, 0, 0, 0];
+
+    const index = buildCorpusIndex(db, { embedQuery });
+    // lexical : « LLM » ne partage rien avec le texte français
+    expect(index.search("LLM", 3)).toEqual([]);
+    // sémantique : la requête pointe le même espace que le fragment
+    const semantic = await index.semanticSearch("LLM", 3);
+    expect(semantic.map((f) => f.id)).toContain("frag-llm-fr");
+
+    // sans encodeur : pas d'erreur, juste aucun résultat (dégradation, jamais panne)
+    const bare = buildCorpusIndex(db);
+    await expect(bare.semanticSearch("LLM", 3)).resolves.toEqual([]);
+  });
+
+  it("interleave : fusion par rang, lexical d'abord, sans doublon", () => {
+    const f = (id: string): IndexedFragment => ({
+      id,
+      sourceId: "s",
+      sourceTitle: null,
+      chunkIndex: 0,
+      locator: "",
+      text: "",
+      embedding: new Float32Array(8),
+    });
+    const a = f("a");
+    const b = f("b");
+    const c = f("c");
+    // intercalage par rang : a (lex 1), b (sem 1), c (lex 2)…
+    expect(interleave([a, c], [b], 5).map((x) => x.id)).toEqual(["a", "b", "c"]);
+    // doublon écarté, borne k respectée
+    expect(interleave([a, b], [a], 2).map((x) => x.id)).toEqual(["a", "b"]);
+    expect(interleave([a, b, c], [], 2).map((x) => x.id)).toEqual(["a", "b"]);
   });
 
   it("voisinage vectoriel : hors de la source du fragment, appareil exclu, ordre par cosine", () => {

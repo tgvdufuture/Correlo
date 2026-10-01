@@ -425,6 +425,11 @@ export interface ConversationClaimView {
   provenance: ClaimProvenanceView[];
   /** Au moins une provenance survit — sinon l'affirmation est montrée « non sourcée ». */
   sourced: boolean;
+  /**
+   * L'affirmation porte du contenu **propre au modèle** (connaissance externe, mise en
+   * relation) : affiché comme tel, jamais comme un fait sourcé.
+   */
+  own_knowledge?: boolean;
 }
 
 /** Le tour tel qu'il s'affiche : les étapes de l'agent, pas le catalogue (il est dans la ligne). */
