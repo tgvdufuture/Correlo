@@ -38,7 +38,7 @@ page.on("requestfailed", (r) => failedRequests.push(`${r.url()} ${r.failure()?.e
 
 /** Une carte de la grille, par sa nature visible dans le titre du clic. */
 const card = (label) =>
-  page.locator('div[title^="Cliquer :"]', { hasText: label }).first();
+  page.locator('div.cursor-pointer', { hasText: label }).first();
 
 const backToRoot = async () => {
   // après une création, on peut être en vue PLAN (h1 = le canvas créé, bouton
@@ -50,7 +50,7 @@ const backToRoot = async () => {
   } else {
     await page.getByRole("button", { name: "Racine" }).click();
   }
-  await page.getByRole("heading", { name: "Tableaux" }).waitFor({ timeout: 8_000 });
+  await page.getByText(/\d+ tableau\(x\)/).waitFor({ timeout: 8_000 });
 };
 
 /** Créer depuis le niveau courant : un canvas ou un dossier (les deux tuiles).
@@ -83,7 +83,7 @@ const deleteCanvas = async (label) => {
   // la notice s'affiche **avant** que le snapshot rechargé ait re-rendu la
   // grille : la carte peut rester visible une frame de plus — on attend qu'elle
   // parte vraiment (sinon le compte du nettoyage lit un DOM périmé)
-  await page.locator('div[title^="Cliquer :"]', { hasText: label }).waitFor({ state: "detached", timeout: 8_000 }).catch(() => {});
+  await page.locator('div.cursor-pointer', { hasText: label }).waitFor({ state: "detached", timeout: 8_000 }).catch(() => {});
 };
 
 try {
@@ -108,7 +108,7 @@ try {
   await preClean();
 
   await page.goto(`${BASE}/explorer`, { waitUntil: "networkidle" });
-  await page.getByRole("heading", { name: "Tableaux" }).waitFor({ timeout: 10_000 });
+  await page.getByText(/\d+ tableau\(x\)/).waitFor({ timeout: 10_000 });
   check("l'explorateur se charge", true);
 
   /* 1 — les DEUX tuiles de création existent à la racine (v1.6.2) */
@@ -200,7 +200,7 @@ try {
     ? page.getByRole("button", { name: "Dossier", exact: true })
     : page.getByRole("button", { name: "Tableaux" });
   await backBtn.click();
-  await page.getByRole("heading", { name: "Tableaux" }).waitFor({ timeout: 8_000 });
+  await page.getByText(/\d+ tableau\(x\)/).waitFor({ timeout: 8_000 });
   // au besoin, remonter à la racine pour le nettoyage (le fil d'Ariane peut avoir
   // disparu si le niveau visité a été supprimé — alors on est déjà à la racine)
   if (await page.getByRole("button", { name: "Racine" }).count()) await backToRoot();
@@ -219,9 +219,11 @@ try {
   check("nettoyage : l'arbre du check est parti", residue === 0, `${residue} carte(s)`);
 
   /* 8 — le clic droit (v1.6.3) : créer canvas et dossier où l'on clique */
-  // le FOND du niveau : l'événement part du h1 (déterministe — des coordonnées
-  // libres risquent de tomber sur une carte) et bouillonne jusqu'à la section
-  await page.getByRole("heading", { name: "Tableaux" }).dispatchEvent("contextmenu");
+  // le FOND du niveau : l'événement part de la ligne de compteurs (déterministe —
+  // des coordonnées libres risquent de tomber sur une carte) et bouillonne
+  // jusqu'à la section. C'est l'ancien <h1>Tableaux</h1>, supprimé comme doublon
+  // de la sidebar ; le texte des compteurs est l'ancrage le plus proche du fond.
+  await page.getByText(/\d+ tableau\(x\)/).dispatchEvent("contextmenu");
   await page.getByText("Nouveau canvas ici").click();
   await page.getByLabel("Nom").fill("Canvas clic droit");
   await page.getByRole("button", { name: /Créer le / }).click();
@@ -231,7 +233,7 @@ try {
     ? page.getByRole("button", { name: "Tableaux" })
     : page.getByRole("button", { name: "Racine" });
   await backBtn2.click();
-  await page.getByRole("heading", { name: "Tableaux" }).waitFor({ timeout: 8_000 });
+  await page.getByText(/\d+ tableau\(x\)/).waitFor({ timeout: 8_000 });
   if (await page.getByRole("button", { name: "Racine" }).count()) await backToRoot();
 
   // clic droit SUR une carte dossier : les entrées « dedans » s'y trouvent
@@ -251,7 +253,7 @@ try {
     ? page.getByRole("button", { name: "Dossier", exact: true })
     : page.getByRole("button", { name: "Tableaux" });
   await backBtn3.click();
-  await page.getByRole("heading", { name: "Tableaux" }).waitFor({ timeout: 8_000 });
+  await page.getByText(/\d+ tableau\(x\)/).waitFor({ timeout: 8_000 });
   if (await page.getByRole("button", { name: "Racine" }).count()) await backToRoot();
   await card("Dossier clic droit").click();
   await card("Canvas dedans").waitFor({ timeout: 8_000 });
@@ -264,7 +266,7 @@ try {
   // crashé sans nettoyage ne doit pas faire échouer le run suivant
   const payload = Buffer.from(`# Check v163\n\nDéposé à ${new Date().toISOString()} par le check navigateur.\n`);
   const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
-  await page.locator('div[title^="Cliquer : ouvrir"]', { hasText: "Canvas clic droit" }).first().scrollIntoViewIfNeeded();
+  await page.locator('div.cursor-pointer', { hasText: "Canvas clic droit" }).first().scrollIntoViewIfNeeded();
   const file = { name: "check-v163.txt", mimeType: "text/plain", buffer: payload.toString("base64") };
   const dt = dataTransfer;
   await page.evaluate(([d, f]) => {
@@ -272,7 +274,7 @@ try {
     const bytes = Uint8Array.from(atob(f.buffer), (ch) => ch.charCodeAt(0));
     transfer.items.add(new File([bytes], f.name, { type: f.mimeType }));
   }, [dt, file]);
-  const target = page.locator('div[title^="Cliquer : ouvrir"]', { hasText: "Canvas clic droit" }).first();
+  const target = page.locator('div.cursor-pointer', { hasText: "Canvas clic droit" }).first();
   await target.dispatchEvent("dragenter", { dataTransfer: dt });
   await target.dispatchEvent("dragover", { dataTransfer: dt });
   check("survol : l'anneau « Déposer » apparaît sur la carte", await page.getByText(/Déposer dans « Canvas clic droit »/).isVisible());
@@ -286,7 +288,7 @@ try {
   await page.evaluate(() => {
     const transfer = new DataTransfer();
     transfer.items.add(new File(["x"], "survol-dossier.txt", { type: "text/plain" }));
-    const cards = [...document.querySelectorAll('div[title^="Cliquer : entrer"]')];
+    const cards = [...document.querySelectorAll('div.cursor-pointer')];
     const card = cards.find((el) => el.textContent.includes("Dossier clic droit"));
     card.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
   });
@@ -300,7 +302,7 @@ try {
      l'atelier, et le dossier doit naître DEDANS. */
   // la carte ATELIER est un canvas (titre de clic « ouvrir ») : hasText « Atelier »
   // matcherait aussi un résidu « Dossier dans l'atelier » (carte dossier)
-  await page.locator('div[title^="Cliquer : ouvrir"]', { hasText: "Atelier" }).first().click();
+  await page.locator('div.cursor-pointer', { hasText: "Atelier" }).first().click();
   await page.getByRole("heading", { name: /Atelier/ }).waitFor({ timeout: 8_000 });
   check("clic carte Atelier → vue plan de l'atelier", true);
   await page.getByRole("heading", { name: /Atelier/ }).dispatchEvent("contextmenu");
@@ -318,7 +320,7 @@ try {
   // s'est refermé — remonter à la racine puis rouvrir le plan de l'atelier
   await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
   await backToRoot();
-  await page.locator('div[title^="Cliquer : ouvrir"]', { hasText: "Atelier" }).first().click();
+  await page.locator('div.cursor-pointer', { hasText: "Atelier" }).first().click();
   await page.getByRole("heading", { name: /Atelier/ }).waitFor({ timeout: 8_000 });
   check("retour sur le plan de l'atelier après création du dossier", true);
   // le dépôt de fichiers sur le fond en vue plan va AUSSI au canvas ouvert
@@ -337,8 +339,8 @@ try {
   // puis « Contenu (n) » — la nouvelle entrée v1.6.3-bis — pour voir ce que
   // l'atelier RANGE et supprimer le dossier dedans
   await page.getByRole("button", { name: "Tableaux" }).click();
-  await page.getByRole("heading", { name: "Tableaux" }).waitFor({ timeout: 8_000 });
-  await page.locator('div[title^="Cliquer : ouvrir"]', { hasText: "Atelier" }).first().click();
+  await page.getByText(/\d+ tableau\(x\)/).waitFor({ timeout: 8_000 });
+  await page.locator('div.cursor-pointer', { hasText: "Atelier" }).first().click();
   await page.getByRole("heading", { name: /Atelier/ }).waitFor({ timeout: 8_000 });
   await page.getByRole("button", { name: /Contenu \(/ }).click();
   await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
@@ -387,7 +389,9 @@ check("0 erreur console", consoleErrors.length === 0, consoleErrors.join(" | "))
 // (constat PROGRESS.md : une requête en vol est tuée par la navigation suivante)
 const realFailures = failedRequests.filter((r) => !r.includes("_rsc="));
 check("0 requête en échec", realFailures.length === 0, realFailures.join(" | "));
-if (consoleErrors.length || realFailures.length) failed++;
+// Pas de double comptage ici : la boucle ci-dessous recompte chaque check en
+// échec. Incrémenter aussi `failed` selon `consoleErrors` faisait annoncer
+// « 28/30 » pour **une** seule erreur — un résumé qui ment sur son propre échec.
 for (const r of results) {
   if (!r.ok) failed++;
   console.log(`${r.ok ? "PASS" : "FAIL"}  ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);
