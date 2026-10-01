@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { BookOpen } from "lucide-react";
+import { BookOpen, Plus } from "lucide-react";
+import { PageShell } from "@/components/page-shell";
 import { SourceImport } from "@/components/source-import";
 import { SourceTable } from "@/components/source-table";
 import { Card, CardContent } from "@/components/ui/card";
@@ -35,14 +36,12 @@ export default function SourcesPage() {
   }, [load]);
 
   return (
-    <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">
-      <header className="mb-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Bibliothèque</h1>
-        <p className="text-sm text-muted-foreground">
-          Importez vos sources — elles sont découpées en fragments et indexées localement (Ollama).
-        </p>
-      </header>
-
+    <PageShell
+      icon={BookOpen}
+      title="Bibliothèque"
+      subtitle="Vos sources — découpées en fragments et indexées localement. Déposez-y des notes, des articles ou des PDF, ou importez une URL."
+      wide
+    >
       <div className="mb-8">
         <SourceImport onImported={() => void load()} />
       </div>
@@ -59,15 +58,14 @@ export default function SourcesPage() {
               Chaque source est découpée en fragments ~2 000 caractères puis indexée
               localement via Ollama.
             </p>
+            <p className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Plus className="size-3.5" /> commencez par un premier dépôt ci-dessus
+            </p>
           </CardContent>
         </Card>
       ) : (
-        <Card>
-          <CardContent className="p-0">
-            <SourceTable sources={sources} onChanged={() => void load()} />
-          </CardContent>
-        </Card>
+        <SourceTable sources={sources} onChanged={() => void load()} />
       )}
-    </main>
+    </PageShell>
   );
 }

@@ -19,7 +19,6 @@ import {
   Plus,
   Presentation,
   RefreshCw,
-  Search,
   Sparkles,
   Trash2,
   Upload,
@@ -127,7 +126,7 @@ export function ExplorerScreen() {
 
   const canvases = useMemo(() => snap?.canvases ?? [], [snap]);
   const open = openCanvasId ? canvases.find((c) => c.id === openCanvasId) ?? null : null;
-  const pinned = canvases.filter((c) => c.pinned);
+  // Les épinglés vivent dans la sidebar globale — l'écran ne les reduplique plus.
   /** Les sous-tableaux du canvas ouvert (v1.6.3-bis : un canvas aussi range —
    *  il faut pouvoir VOIR ce qu'il contient sans passer par la racine). */
   const openChildCount = open ? canvases.filter((c) => c.parent_id === open.id).length : 0;
@@ -219,18 +218,8 @@ export function ExplorerScreen() {
     }
     return canvases.filter((c) => !forbidden.has(c.id));
   }, [sel, canvases]);
-  const conversations = useMemo(
-    () =>
-      [...canvases]
-        .flatMap((c) => c.conversations.map((v) => ({ ...v, canvasId: c.id })))
-        .reduce<{ id: string; title: string; updated_at: string; canvasId: string }[]>((acc, v) => {
-          if (!acc.some((x) => x.id === v.id)) acc.push(v);
-          return acc;
-        }, [])
-        .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
-        .slice(0, 6),
-    [canvases]
-  );
+  // Les conversations récentes vivent dans la sidebar globale — l'écran ne les
+  // reduplique plus (le composant `AppSidebar` fetch le même snapshot).
 
   /** Un geste d'écriture : l'écran recharge le snapshot après — la base reste la vérité. */
   const act = useCallback(
@@ -414,61 +403,13 @@ export function ExplorerScreen() {
   }
 
   return (
-    <div className="flex flex-1 min-h-0">
-      {/* ═══════════ colonne 1 : la nav ═══════════ */}
-      <aside className="w-60 shrink-0 border-r border-border px-3 py-4 overflow-y-auto">
-        <p className="px-2 pb-2 text-sm font-semibold tracking-tight">Sérendipité</p>
-        <nav className="space-y-0.5 text-sm" aria-label="Navigation principale">
-          <span className="block rounded-md bg-muted px-2.5 py-1.5 font-medium">🗂 Tableaux</span>
-          <Link href="/sources" className="block rounded-md px-2.5 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">
-            📄 Bibliothèque
-          </Link>
-          <Link href="/suggestions" className="block rounded-md px-2.5 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">
-            🧭 Connexions
-          </Link>
-          <Link href="/syntheses" className="block rounded-md px-2.5 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">
-            🧩 Synthèses
-          </Link>
-          <Link href="/conversation" className="block rounded-md px-2.5 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">
-            💬 Conversation
-          </Link>
-        </nav>
-
-        <p className="mt-5 px-2 text-[11px] uppercase tracking-wider text-muted-foreground">Épinglés</p>
-        <div className="mt-1 space-y-0.5">
-          {pinned.map((c) => (
-            <button
-              key={c.id}
-              className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
-              onClick={() => {
-                openFromShortcut(c.id);
-              }}
-            >
-              <span className={`size-2.5 shrink-0 rounded-sm ${canvasColorClass(c.color)}`} />
-              <span className="truncate">{c.label}</span>
-              <span className="ml-auto text-[11px] text-muted-foreground">{c.totals.constructions + c.totals.sources}</span>
-            </button>
-          ))}
-          {pinned.length === 0 && <p className="px-2.5 text-xs text-muted-foreground">Rien d&apos;épinglé — survolez un dossier puis ★</p>}
-        </div>
-
-        <p className="mt-5 px-2 text-[11px] uppercase tracking-wider text-muted-foreground">Conversations récentes</p>
-        <div className="mt-1 space-y-0.5">
-          {conversations.map((v) => (
-            <button
-              key={v.id}
-              className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
-              onClick={() => setSel({ kind: "conversation", id: v.id })}
-            >
-              <MessageSquare className="size-3.5 shrink-0" />
-              <span className="truncate">{v.title}</span>
-            </button>
-          ))}
-          {conversations.length === 0 && <p className="px-2.5 text-xs text-muted-foreground">Aucune conversation.</p>}
-        </div>
-      </aside>
-
-      {/* ═══════════ colonne 2 : dossiers OU canvas ═══════════ */}
+    <div className="flex min-h-0 flex-1">
+      {/* ═══════════ la grille : dossiers OU canvas ═══════════ */}
+      {/* Deux colonnes verticales permanentes (sidebar + aperçu) faisaient une
+          « barre » de plus, alors que l'aperçu ne venait qu'après la sidebar globale.
+          L'aperçu a été retiré de cet écran : le détail d'un objet et ses gestes
+          appartiennent au plein écran (`/canvas/<id>`), qui est déjà le lieu
+          focalisé de l'app. Ici, il n'y a plus qu'une seule colonne de contenu. */}
       {/* v1.6.3-bis : le FOND est un geste — clic droit = créer ICI, drop de
           fichiers = déposer DANS le canvas ouvert (sinon le niveau visité,
           sinon l'atelier). Le mensonge v1.6.3 (« Nouveau dossier ici » qui
@@ -497,14 +438,22 @@ export function ExplorerScreen() {
       >
         {open === null ? (
           <>
+            {/* Pas de titre « Tableaux » ici : la sidebar porte déjà ce nom et
+                marque l'onglet actif — le répéter en haut donnait deux barres qui
+                disaient la même chose. Il reste les **gestes** (créer un dossier,
+                un canvas) et les **comptes**, qui ne sont nulle part ailleurs. */}
             <div className="mb-4 flex items-baseline gap-3">
-              <h1 className="text-xl font-semibold tracking-tight">Tableaux</h1>
               <span className="text-xs text-muted-foreground">
                 {canvases.length} tableau(x) · {canvases.reduce((n, c) => n + c.totals.conversations, 0)} conversation(s)
               </span>
-              <Button size="sm" className="ml-auto" onClick={() => openNew("canvas", browseInId)}>
-                <Plus className="mr-1 size-4" /> Nouveau canvas
-              </Button>
+              <div className="ml-auto flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => openNew("folder", browseInId)}>
+                  <FolderPlus className="mr-1 size-4" /> Dossier
+                </Button>
+                <Button size="sm" onClick={() => openNew("canvas", browseInId)}>
+                  <Plus className="mr-1 size-4" /> Nouveau canvas
+                </Button>
+              </div>
             </div>
             {/* le fil d'Ariane du niveau visité (v1.6.1 : les sous-tableaux) */}
             {browseIn && (
@@ -829,20 +778,6 @@ export function ExplorerScreen() {
           </>
         )}
       </section>
-
-      {/* ═══════════ colonne 3 : l'aperçu ═══════════ */}
-      <aside className="w-[360px] shrink-0 border-l border-border overflow-y-auto px-4 py-4">
-        <Preview
-          snap={snap}
-          sel={sel}
-          setSel={setSel}
-          openCanvas={open}
-          setConvOpen={(canvasId) => {
-            setConvTarget(canvasId);
-            setConvOpen(true);
-          }}
-        />
-      </aside>
 
       {/* ── le menu contextuel (v1.6.3) : créer canvas/dossier où l'on clique ── */}
       {menu && (
@@ -1229,228 +1164,6 @@ function CanvasVignette({
   );
 }
 
-/* ────────────────────────── l'aperçu (poste de pilotage) ────────────────────────── */
-
-function Preview({
-  snap,
-  sel,
-  setSel,
-  openCanvas,
-  setConvOpen,
-}: {
-  snap: Snapshot;
-  sel: { kind: "node" | "frame" | "canvas" | "conversation"; id: string } | null;
-  setSel: (s: { kind: "node" | "frame" | "canvas" | "conversation"; id: string } | null) => void;
-  openCanvas: Snapshot["canvases"][number] | null;
-  setConvOpen: (canvasId: string | null) => void;
-}) {
-  const node = useMemo(() => {
-    if (sel?.kind !== "node" || !openCanvas) return null;
-    return openCanvas.nodes.find((n) => n.ref === sel.id) ?? null;
-  }, [sel, openCanvas]);
-  const frame = useMemo(() => {
-    if (sel?.kind !== "frame" || !openCanvas) return null;
-    return openCanvas.frames.find((f) => f.id === sel.id) ?? null;
-  }, [sel, openCanvas]);
-  const conv = useMemo(() => {
-    if (sel?.kind !== "conversation") return null;
-    for (const c of snap.canvases) {
-      const found = c.conversations.find((v) => v.id === sel.id);
-      if (found) return found;
-    }
-    return null;
-  }, [sel, snap]);
-
-  if (conv) {
-    return (
-      <div>
-        <p className="text-sm font-semibold leading-6">{conv.title}</p>
-        <p className="mt-0.5 text-xs text-muted-foreground">Conversation · active {relTime(conv.updated_at)}</p>
-        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Agir</p>
-        <div className="mt-2 flex flex-wrap gap-2">
-          <Button size="sm" asChild>
-            <Link href={`/conversation/${conv.id}`}>Ouvrir la conversation</Link>
-          </Button>
-        </div>
-        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Tableaux liés</p>
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {snap.canvases
-            .filter((c) => c.conversations.some((v) => v.id === conv.id))
-            .map((c) => (
-              <Badge key={c.id} variant="outline" className="gap-1.5 font-normal">
-                <span className={`size-2 rounded-sm ${canvasColorClass(c.color)}`} />
-                {c.label}
-              </Badge>
-            ))}
-        </div>
-      </div>
-    );
-  }
-
-  if (node && openCanvas) {
-    return (
-      <div>
-        <p className="text-sm font-semibold leading-6">
-          {node.kind === "source" ? node.title : node.text}
-        </p>
-        <p className="mt-0.5 text-xs text-muted-foreground">
-          {node.kind === "source" ? "Fichier" : "Construction"} · tableau « {openCanvas.label} »
-          {node.frame_id ? "" : " · hors frame"}
-        </p>
-        {node.kind === "construction" && (
-          <p className="mt-2 text-xs text-muted-foreground">
-            Statut : {node.epistemic_status.toLowerCase()}
-            {node.stale ? " · périmé (une source citée a disparu)" : ""}
-          </p>
-        )}
-        {node.kind === "source" && (
-          <p className="mt-2 text-xs text-muted-foreground">{node.fragment_count} fragment(s)</p>
-        )}
-        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Liens IA</p>
-        <NodeLinks node={node} />
-        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Agir</p>
-        <div className="mt-2 flex flex-wrap gap-2">
-          <Button size="sm" onClick={() => setConvOpen(openCanvas.id)}>
-            <MessageSquare className="mr-1 size-4" /> Discuter de ça
-          </Button>
-          {/* AC3 : chaque action mène à l'écran existant — elle ne le réinvente pas.
-              « Investiguer » n'a de sens que pour une suggestion ; « Synthétiser »
-              n'existe que pour une source (une synthèse cite des sources). */}
-          {node.links.suggestions > 0 && (
-            <Button size="sm" variant="outline" asChild>
-              <Link href="/suggestions">
-                <Search className="mr-1 size-4" /> Investiguer ({node.links.suggestions})
-              </Link>
-            </Button>
-          )}
-          {node.kind === "source" && node.links.syntheses > 0 && (
-            <Button size="sm" variant="outline" asChild>
-              <Link href="/syntheses">
-                <Sparkles className="mr-1 size-4" /> Synthétiser ({node.links.syntheses})
-              </Link>
-            </Button>
-          )}
-          <Button size="sm" variant="outline" asChild>
-            {/* AC2 : l'objet vit peut-être dans une frame — le focalisé l'ouvre dessus */}
-            <Link href={`/canvas/${openCanvas.id}${node.frame_id ? `?frame=${node.frame_id}` : ""}`}>
-              Plein écran
-            </Link>
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
-  if (frame && openCanvas) {
-    return (
-      <div>
-        <p className="text-sm font-semibold leading-6">{frame.label}</p>
-        <p className="mt-0.5 text-xs text-muted-foreground">
-          Frame du tableau « {openCanvas.label} » · {frame.constructions + frame.sources} objet(s)
-        </p>
-        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Agir</p>
-        <div className="mt-2 flex flex-wrap gap-2">
-          <Button size="sm" onClick={() => setConvOpen(openCanvas.id)}>
-            <MessageSquare className="mr-1 size-4" /> Discuter de ça
-          </Button>
-          <Button size="sm" variant="outline" asChild>
-            {/* AC2 : ouvrir le plan centré sur CETTE frame */}
-            <Link href={`/canvas/${openCanvas.id}?frame=${frame.id}`}>Plein écran</Link>
-          </Button>
-        </div>
-        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Objets de la frame</p>
-        <div className="mt-2 space-y-1">
-          {openCanvas.nodes
-            .filter((n) => n.frame_id === frame.id)
-            .map((n) => (
-              <button
-                key={n.ref}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted"
-                onClick={() => setSel({ kind: "node", id: n.ref })}
-              >
-                {n.kind === "source" ? <FileText className="size-3.5 shrink-0" /> : <Sparkles className="size-3.5 shrink-0" />}
-                <span className="min-w-0 flex-1 truncate">{n.kind === "source" ? n.title : n.text}</span>
-              </button>
-            ))}
-          {frame.constructions + frame.sources === 0 && <p className="text-xs text-muted-foreground">Frame vide.</p>}
-        </div>
-      </div>
-    );
-  }
-
-  if (openCanvas) {
-    return (
-      <div>
-        <p className="text-sm font-semibold leading-6">{openCanvas.label}</p>
-        <p className="mt-0.5 text-xs text-muted-foreground">
-          Tableau{openCanvas.is_default ? " — l'atelier (non supprimable)" : ""} · {openCanvas.totals.frames} frame(s) ·{" "}
-          {openCanvas.totals.constructions + openCanvas.totals.sources} objet(s)
-        </p>
-        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Agir</p>
-        <div className="mt-2 flex flex-wrap gap-2">
-          <Button size="sm" onClick={() => setConvOpen(openCanvas.id)}>
-            <MessageSquare className="mr-1 size-4" /> Discuter de ça
-          </Button>
-          <Button size="sm" variant="outline" asChild>
-            <Link href={`/canvas/${openCanvas.id}`}>Plein écran</Link>
-          </Button>
-        </div>
-        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">
-          Conversations ancrées ({openCanvas.conversations.length})
-        </p>
-        <div className="mt-2 space-y-1">
-          {openCanvas.conversations.map((v) => (
-            <button
-              key={v.id}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted"
-              onClick={() => setSel({ kind: "conversation", id: v.id })}
-            >
-              <MessageSquare className="size-3.5 shrink-0" />
-              <span className="min-w-0 flex-1 truncate">{v.title}</span>
-            </button>
-          ))}
-          {openCanvas.conversations.length === 0 && (
-            <p className="text-xs text-muted-foreground">Aucune — « Discuter de ça » depuis un objet, ou ⤵</p>
-          )}
-        </div>
-        <p className="mt-4 text-[11px] uppercase tracking-wider text-muted-foreground">Frames</p>
-        <div className="mt-2 space-y-1">
-          {openCanvas.frames.map((f) => (
-            <button
-              key={f.id}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted"
-              onClick={() => setSel({ kind: "frame", id: f.id })}
-            >
-              <span className="min-w-0 flex-1 truncate">▦ {f.label}</span>
-              <Badge variant="outline" className="text-[10px] font-normal text-muted-foreground">
-                {f.constructions + f.sources}
-              </Badge>
-            </button>
-          ))}
-          {openCanvas.frames.length === 0 && <p className="text-xs text-muted-foreground">Aucune frame.</p>}
-        </div>
-        {openCanvas.is_default && openCanvas.unframed.constructions + openCanvas.unframed.sources > 0 && (
-          <p className="mt-4 text-xs text-muted-foreground">
-            {openCanvas.unframed.constructions + openCanvas.unframed.sources} objet(s) « hors frame » — posés librement sur le plan.
-          </p>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      <p className="text-sm font-semibold">Rien de sélectionné</p>
-      <p className="mt-1 text-xs text-muted-foreground">
-        Cliquez un dossier (il s&apos;ouvre), une conversation, ou un objet sur le plan.
-      </p>
-      <Button size="sm" className="mt-4" onClick={() => setConvOpen(null)}>
-        <MessageSquare className="mr-1 size-4" /> Nouvelle conversation
-      </Button>
-    </div>
-  );
-}
-
 /* ────────────────────────── déplacer un tableau (v1.6.1) ───────────────────── */
 
 /**
@@ -1507,42 +1220,6 @@ function MoveCanvasModal({
           <Button variant="outline" size="sm" onClick={onClose}>Annuler</Button>
         </div>
       </div>
-    </div>
-  );
-}
-
-/* ────────────────────────── les liens IA d'un objet (AC3) ───────────────────── */
-
-/**
- * Les liens d'un objet : **des compteurs**, jamais des listes complètes. L'écran
- * expert (/suggestions, /syntheses) porte le détail et les décisions — l'aperçu
- * dit « ce qui existe » et les boutons y mènent (AC3 : « chaque action mène aux
- * écrans existants, elle ne les réinvente pas »).
- */
-function NodeLinks({ node }: { node: Snapshot["canvases"][number]["nodes"][number] }) {
-  const entries: { label: string; n: number }[] = [
-    { label: node.kind === "construction" ? "suggestion parente" : "suggestion(s) ouverte(s)", n: node.links.suggestions },
-    ...(node.kind === "source" ? [{ label: "synthèse(s) proposée(s)", n: node.links.syntheses }] : []),
-    ...(node.links.investigations > 0 ? [{ label: "enquête(s)", n: node.links.investigations }] : []),
-  ];
-  const active = entries.filter((e) => e.n > 0);
-  if (active.length === 0) {
-    return (
-      <p className="text-xs text-muted-foreground">
-        {node.kind === "source"
-          ? "Aucune connexion proposée pour l'instant — l'analyse tourne en tâche de fond."
-          : "Aucun lien d'analyse — cette construction vient d'une intégration."}
-      </p>
-    );
-  }
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {active.map((e) => (
-        <Badge key={e.label} variant="outline" className="gap-1.5 font-normal">
-          {e.label}
-          <span className="font-medium">{e.n}</span>
-        </Badge>
-      ))}
     </div>
   );
 }

@@ -84,37 +84,40 @@
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  /* Le sombre « app desktop pro » (2026-10-01) : une base neutre légèrement bleutée,
+     deux profondeurs distinctes (fond vs surfaces élevées) — un seul gris plat fait
+     « page web sombre », deux plans font « application ». */
+  --background: oklch(0.17 0.008 260);
+  --foreground: oklch(0.93 0.004 260);
+  --card: oklch(0.215 0.01 260);
+  --card-foreground: oklch(0.93 0.004 260);
+  --popover: oklch(0.23 0.01 260);
+  --popover-foreground: oklch(0.93 0.004 260);
+  --primary: oklch(0.78 0.11 255);
+  --primary-foreground: oklch(0.16 0.02 260);
+  --secondary: oklch(0.27 0.012 260);
+  --secondary-foreground: oklch(0.93 0.004 260);
+  --muted: oklch(0.25 0.012 260);
+  --muted-foreground: oklch(0.65 0.015 260);
+  --accent: oklch(0.27 0.012 260);
+  --accent-foreground: oklch(0.93 0.004 260);
+  --destructive: oklch(0.66 0.19 25);
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 13%);
+  --ring: oklch(0.55 0.08 255);
+  --chart-1: oklch(0.78 0.11 255);
+  --chart-2: oklch(0.68 0.13 200);
+  --chart-3: oklch(0.7 0.12 150);
+  --chart-4: oklch(0.75 0.13 80);
+  --chart-5: oklch(0.68 0.15 310);
+  --sidebar: oklch(0.19 0.009 260);
+  --sidebar-foreground: oklch(0.93 0.004 260);
+  --sidebar-primary: oklch(0.78 0.11 255);
+  --sidebar-primary-foreground: oklch(0.16 0.02 260);
+  --sidebar-accent: oklch(0.26 0.012 260);
+  --sidebar-accent-foreground: oklch(0.93 0.004 260);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.55 0.08 255);
 }
 
 @layer base {
@@ -127,4 +130,22 @@
   html {
     @apply font-sans;
   }
+}
+
+/* L'indicateur de navigation en cours (sidebar).
+   Le délai de 100 ms est délibéré : sur une app locale la navigation se résout en
+   quelques dizaines de millisecondes, et un point qui apparaît puis disparaît
+   immédiatement se lit comme un bug, pas comme un retour. L'animation retient
+   donc l'opacité nulle pendant ce délai, puis la monte. */
+@keyframes nav-hint-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.nav-hint-pending {
+  animation: nav-hint-in 100ms ease-out 100ms both;
 }
