@@ -391,8 +391,7 @@ function MessageView({ message }: { message: ConversationMessageView }) {
 
         {message.status === "pending" ? (
           <p role="status" className="text-sm text-muted-foreground">
-            L&apos;agent explore le corpus : il cherche, élargit, puis répond en citant ses
-            sources. Cela peut prendre une minute.
+            {liveProgress(message.run)}
           </p>
         ) : null}
 
@@ -408,7 +407,9 @@ function MessageView({ message }: { message: ConversationMessageView }) {
 
         {message.claims.length > 0 ? <AnswerProse claims={message.claims} /> : null}
 
-        {message.run ? <RunView run={message.run} /> : null}
+        {message.run ? (
+          <RunView run={message.run} live={message.status === "pending"} />
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -578,16 +579,49 @@ function ProvenanceView({ provenance }: { provenance: ClaimProvenanceView }) {
   );
 }
 
-/** Ce que l'agent a fait dans ce tour — visible, y compris ce qui a été refusé. */
-function RunView({ run }: { run: ConversationRunView }) {
+/**
+ * L'état d'avancement, en toutes lettres, tant que le tour n'a pas de réponse.
+ *
+ * Le texte fixe « cela peut prendre une minute » a été **mesuré faux** : le tour réel du
+ * 2026-10-02 a mis 4 min 45 (8 appels LLM, 2 pages web lues en échec) et l'écran n'a rien
+ * bougé de toute la durée — un travail réel, invisible. La phrase est donc tirée des
+ * **compteurs du tour**, que la route relit à chaque étape : le budget se remplit sous les
+ * yeux de l'utilisateur, au lieu d'attendre devant un texte qui ne change jamais.
+ */
+function liveProgress(run: ConversationRunView | null): string {
+  if (!run || run.steps.length === 0) {
+    return "L'agent démarre : il cherche dans le corpus, puis répond en citant ses sources.";
+  }
+  const web = run.web_budget > 0 ? `, ${run.web_steps}/${run.web_budget} web` : "";
+  return (
+    `L'agent travaille : ${run.internal_steps}/${run.step_budget} étape(s) interne(s)${web}, ` +
+    `${run.llm_calls} appel(s) au modèle, ${run.steps.length} action(s) déjà faite(s). ` +
+    "Le détail est juste en dessous, et il s'allonge à chaque étape."
+  );
+}
+
+/**
+ * Ce que l'agent a fait dans ce tour — visible, y compris ce qui a été refusé.
+ *
+ * **`live` ouvre la trace pendant le tour.** Le repli cachait le travail de l'agent : la
+ * trace **existe déjà** dans la ligne (`persist` écrit après chaque étape) et l'API la sert
+ * — il n'y avait qu'à la montrer. Un tour **terminé** redevient un `<details>` replié : le
+ * bruit d'un tour achevé n'a pas sa place au milieu de la lecture.
+ */
+function RunView({ run, live = false }: { run: ConversationRunView; live?: boolean }) {
   const webReason =
     WEB_UNLOCK_REASON_LABEL[run.web_unlock_reason ?? ""] ??
     (run.web_unlocked ? "outils web exposés" : "outils web non exposés");
   return (
-    <details className="border-t border-border pt-2 text-xs">
+    <details open={live} className="border-t border-border pt-2 text-xs">
       <summary className="cursor-pointer text-muted-foreground">
-        <Search className="mr-1 inline size-3" />
-        Tour de l&apos;agent : {run.internal_steps}/{run.step_budget} étape(s) interne(s)
+        {live ? (
+          <Loader2 className="mr-1 inline size-3 animate-spin" />
+        ) : (
+          <Search className="mr-1 inline size-3" />
+        )}
+        {live ? "En cours — " : "Tour de l&apos;agent : "}
+        {run.internal_steps}/{run.step_budget} étape(s) interne(s)
         {run.web_budget > 0 ? ` · ${run.web_steps}/${run.web_budget} web` : ""} · {run.llm_calls}{" "}
         appel(s) LLM
         {run.steps_from_cache > 0 ? ` (+${run.steps_from_cache} en cache)` : ""}
@@ -659,7 +693,9 @@ function RunView({ run }: { run: ConversationRunView }) {
         </div>
       ) : null}
       {run.steps.length === 0 ? (
-        <p className="pt-2 text-muted-foreground">Aucune étape exécutée.</p>
+        <p className="pt-2 text-muted-foreground">
+          {live ? "Première action en cours…" : "Aucune étape exécutée."}
+        </p>
       ) : (
         <ol className="flex flex-col gap-1 pt-2">
           {run.steps.map((step) => (

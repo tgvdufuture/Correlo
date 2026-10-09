@@ -41,22 +41,19 @@ const card = (label) =>
   page.locator('div.cursor-pointer', { hasText: label }).first();
 
 const backToRoot = async () => {
-  // après une création, on peut être en vue PLAN (h1 = le canvas créé, bouton
-  // « Tableaux ») ou en vue DOSSIER (bouton « Racine ») : les deux chemins
-  // mènent à la grille racine
-  const planBack = page.getByRole("button", { name: "Tableaux" });
-  if (await planBack.count()) {
-    await planBack.click();
-  } else {
-    await page.getByRole("button", { name: "Racine" }).click();
-  }
+  // le chemin de la grille porte TOUJOURS « Tableaux » : c'est lui qui remonte à
+  // la racine, quel que soit le niveau visité (v1.6.4)
+  await page.getByRole("button", { name: "Tableaux" }).first().click();
   await page.getByText(/\d+ tableau\(x\)/).waitFor({ timeout: 8_000 });
 };
 
-/** Créer depuis le niveau courant : un canvas ou un dossier (les deux tuiles).
- *  Après création, l'écran entre dans le dossier créé (ou ouvre le canvas) : ce
- *  que le h1 dit ensuite dépend de la nature — un dossier se vérifie par le fil
- *  d'Ariane, pas par un h1 de plan. */
+/** Le niveau affiché, tel que le chemin le nomme (`aria-current="page"`). */
+const currentLevel = (label) => page.locator('[aria-current="page"]', { hasText: label });
+
+/** Créer depuis le niveau courant : un canvas ou un dossier (les deux boutons du
+ *  bandeau). v1.6.4 : un dossier créé fait **entrer dedans** (le chemin le
+ *  nomme), un canvas créé **reste dans le niveau** (sa carte y est visible) —
+ *  plus de saut dans le plan vide d'un canvas qui n'a rien. */
 const createFromLevel = async (label, which) => {
   await page
     .getByRole("button", { name: which === "folder" ? "Nouveau dossier" : "Nouveau canvas" })
@@ -64,14 +61,10 @@ const createFromLevel = async (label, which) => {
     .click();
   await page.getByLabel("Nom").fill(label);
   await page.getByRole("button", { name: /Créer le / }).click();
-  await page.waitForTimeout(400);
   if (which === "folder") {
-    // entré dedans : le fil d'Ariane le dit (Racine / …) et le chemin affiché
-    // porte le nom du dossier (le h1 de la grille reste « Tableaux »)
-    await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
-    await page.locator("button", { hasText: label }).first().waitFor({ timeout: 8_000 });
+    await currentLevel(label).waitFor({ timeout: 8_000 });
   } else {
-    await page.getByRole("heading", { name: label }).waitFor({ timeout: 8_000 });
+    await card(label).waitFor({ timeout: 8_000 });
   }
 };
 
@@ -111,26 +104,23 @@ try {
   await page.getByText(/\d+ tableau\(x\)/).waitFor({ timeout: 10_000 });
   check("l'explorateur se charge", true);
 
-  /* 1 — les DEUX tuiles de création existent à la racine (v1.6.2) */
-  check("tuile « Nouveau canvas »", (await page.getByRole("button", { name: "Nouveau canvas" }).count()) >= 1);
-  check("tuile « Nouveau dossier »", (await page.getByRole("button", { name: "Nouveau dossier" }).count()) >= 1);
+  /* 1 — les DEUX créations existent à la racine (v1.6.2 ; v1.6.4 : un seul rang,
+     dans le bandeau — les tuiles en pointillés de la grille ont disparu) */
+  check("bouton « Nouveau canvas »", (await page.getByRole("button", { name: "Nouveau canvas" }).count()) >= 1);
+  check("bouton « Nouveau dossier »", (await page.getByRole("button", { name: "Nouveau dossier" }).count()) >= 1);
 
   /* 2 — créer un dossier à la racine, puis un canvas DANS ce dossier */
   await createFromLevel("Dossier de check", "folder");
-  // après création, on est DANS le dossier (fil d'Ariane, grille vide) — la
-  // carte du dossier n'existe plus (on ne se voit pas soi-même) : le canvas se
-  // crée via la tuile du niveau visité, parent implicite = le dossier courant
+  // après création, on est DANS le dossier (le chemin le nomme, grille vide) —
+  // la carte du dossier n'existe plus (on ne se voit pas soi-même) : le canvas se
+  // crée via le bouton du niveau, parent implicite = le dossier courant
   await page.getByRole("button", { name: "Nouveau canvas" }).first().click();
+  await page.getByText(/dans « Dossier de check »/).waitFor({ timeout: 8_000 });
   await page.getByLabel("Nom").fill("Canvas dans le dossier");
   await page.getByRole("button", { name: /Créer le / }).click();
-  await page.getByRole("heading", { name: "Canvas dans le dossier" }).waitFor({ timeout: 8_000 });
-  check("canvas créé dans le dossier ouvert → plan ouvert", true);
-  // « Dossier » (le bouton de retour, renommé quand on visite un dossier) rend
-  // le niveau du dossier — jamais un saut brutal à la racine
-  await page.getByRole("button", { name: "Dossier", exact: true }).click();
-  await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
   await card("Canvas dans le dossier").waitFor({ timeout: 8_000 });
-  check("« Dossier » rend le niveau visité (le canvas y est)", true);
+  check("canvas créé dans le dossier → sa carte est là, on reste dans le dossier", true);
+  check("la création n'a pas quitté le dossier", (await currentLevel("Dossier de check").count()) === 1);
   await backToRoot();
   // on est revenu à la racine : le canvas imbriqué n'y est PAS
   check("le canvas imbriqué n'est pas à la racine", (await card("Canvas dans le dossier").count()) === 0);
@@ -138,16 +128,16 @@ try {
   /* 3 — ajouter un sous-dossier DANS le dossier, puis contenu MÉLANGÉ */
   // on est à la racine : entrer dans le dossier par un clic de carte
   await card("Dossier de check").click();
-  await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
-  // la tuile du niveau pose le sous-dossier DANS le dossier visité (parent implicite)
+  await currentLevel("Dossier de check").waitFor({ timeout: 8_000 });
+  // le bouton du niveau pose le sous-dossier DANS le dossier visité (parent implicite)
   await page.getByRole("button", { name: "Nouveau dossier" }).first().click();
   await page.getByLabel("Nom").fill("Sous-dossier B");
   await page.getByRole("button", { name: /Créer le / }).click();
-  await page.waitForTimeout(400);
-  // la création d'un dossier entre dedans (grille vide, fil d'Ariane « Racine /
-  // Dossier de check / Sous-dossier B ») : remonter au parent via le fil d'Ariane
-  await page.locator("button", { hasText: "Dossier de check" }).first().click();
-  await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
+  // la création d'un dossier entre dedans (chemin « Tableaux / Dossier de check /
+  // Sous-dossier B ») : remonter au parent via le chemin
+  await currentLevel("Sous-dossier B").waitFor({ timeout: 8_000 });
+  await page.locator("nav[aria-label='Chemin'] button", { hasText: "Dossier de check" }).first().click();
+  await currentLevel("Dossier de check").waitFor({ timeout: 8_000 });
   // …et le niveau du dossier montre le MÉLANGE : canvas + sous-dossier
   await card("Canvas dans le dossier").waitFor({ timeout: 8_000 });
   await card("Sous-dossier B").waitFor({ timeout: 8_000 });
@@ -164,7 +154,7 @@ try {
   const targetTexts = await modal.locator("button").allInnerTexts();
   check("cibles = tous les tableaux + « À la racine »", targetTexts.some((t) => t.includes("Atelier")) && targetTexts.some((t) => t.includes("Perso")), targetTexts.join(" | ").slice(0, 120));
   await modal.locator("button", { hasText: "À la racine" }).click();
-  await page.getByText("Tableau remis à la racine.").waitFor({ timeout: 8_000 });
+  await page.getByText(/rangé dans la racine/).waitFor({ timeout: 8_000 });
   check("déplacement du canvas vers la racine", true);
   await backToRoot();
   await card("Canvas dans le dossier").waitFor({ timeout: 8_000 });
@@ -176,7 +166,7 @@ try {
   await card("Canvas dans le dossier").locator('button[title="Déplacer vers…"]').click();
   const modal2 = page.locator("div.fixed", { hasText: "Déplacer « Canvas dans le dossier » vers…" });
   await modal2.locator("button", { hasText: "Dossier de check" }).click();
-  await page.getByText("Tableau déplacé.").waitFor({ timeout: 8_000 });
+  await page.getByText(/rangé dans « Dossier de check »/).waitFor({ timeout: 8_000 });
   // on est déjà à la racine (le canvas y était, on l'a déplacé par la modale) :
   // la grille racine est là, pas besoin de backToRoot
   await card("Dossier de check").hover();
@@ -194,16 +184,10 @@ try {
   await card("Canvas dans le dossier").click();
   await page.getByRole("heading", { name: "Canvas dans le dossier" }).waitFor({ timeout: 8_000 });
   check("clic canvas → plan ouvert (pas la grille)", true);
-  // le bouton de retour : « Dossier » si le canvas vit dans un dossier (browseIn
-  // est resté sur le niveau), sinon « Tableaux » — les deux rendent la grille
-  const backBtn = (await page.getByRole("button", { name: "Dossier", exact: true }).count())
-    ? page.getByRole("button", { name: "Dossier", exact: true })
-    : page.getByRole("button", { name: "Tableaux" });
-  await backBtn.click();
+  // le bouton de retour nomme le niveau d'où l'on vient (v1.6.4 : le libellé suit
+  // la nature réelle du niveau, au lieu de « Dossier » ou « Tableaux » au hasard)
+  await page.getByRole("button", { name: "Tableaux" }).first().click();
   await page.getByText(/\d+ tableau\(x\)/).waitFor({ timeout: 8_000 });
-  // au besoin, remonter à la racine pour le nettoyage (le fil d'Ariane peut avoir
-  // disparu si le niveau visité a été supprimé — alors on est déjà à la racine)
-  if (await page.getByRole("button", { name: "Racine" }).count()) await backToRoot();
 
   /* 7 — nettoyage */
   // ⚠ `hasText` matche les sous-chaînes : « Dossier de check » matche la carte
@@ -224,40 +208,28 @@ try {
   // jusqu'à la section. C'est l'ancien <h1>Tableaux</h1>, supprimé comme doublon
   // de la sidebar ; le texte des compteurs est l'ancrage le plus proche du fond.
   await page.getByText(/\d+ tableau\(x\)/).dispatchEvent("contextmenu");
+  await page.getByText("Créer à la racine").waitFor({ timeout: 8_000 });
+  check("le menu du fond À LA RACINE le dit (plus de « Créer ici » ambigu)", true);
   await page.getByText("Nouveau canvas ici").click();
   await page.getByLabel("Nom").fill("Canvas clic droit");
   await page.getByRole("button", { name: /Créer le / }).click();
-  await page.getByRole("heading", { name: "Canvas clic droit" }).waitFor({ timeout: 8_000 });
-  check("clic droit fond → « Nouveau canvas ici » → modale → plan ouvert", true);
-  const backBtn2 = (await page.getByRole("button", { name: "Tableaux" }).count())
-    ? page.getByRole("button", { name: "Tableaux" })
-    : page.getByRole("button", { name: "Racine" });
-  await backBtn2.click();
-  await page.getByText(/\d+ tableau\(x\)/).waitFor({ timeout: 8_000 });
-  if (await page.getByRole("button", { name: "Racine" }).count()) await backToRoot();
+  await card("Canvas clic droit").waitFor({ timeout: 8_000 });
+  check("clic droit fond → « Nouveau canvas ici » → créé à la racine, grille restée", true);
 
   // clic droit SUR une carte dossier : les entrées « dedans » s'y trouvent
   await page.getByRole("button", { name: "Nouveau dossier" }).first().click();
   await page.getByLabel("Nom").fill("Dossier clic droit");
   await page.getByRole("button", { name: /Créer le / }).click();
-  await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
+  await currentLevel("Dossier clic droit").waitFor({ timeout: 8_000 });
   await backToRoot();
   await card("Dossier clic droit").click({ button: "right" });
   await page.getByText("Nouveau canvas dedans").click();
   await page.getByLabel("Nom").fill("Canvas dedans");
   await page.getByRole("button", { name: /Créer le / }).click();
-  await page.getByRole("heading", { name: "Canvas dedans" }).waitFor({ timeout: 8_000 });
+  await card("Canvas dedans").waitFor({ timeout: 8_000 });
   check("clic droit carte dossier → « Nouveau canvas dedans » → créé DEDANS", true);
   // le canvas est dans « Dossier clic droit » : on l'y retrouve depuis la racine
-  const backBtn3 = (await page.getByRole("button", { name: "Dossier", exact: true }).count())
-    ? page.getByRole("button", { name: "Dossier", exact: true })
-    : page.getByRole("button", { name: "Tableaux" });
-  await backBtn3.click();
-  await page.getByText(/\d+ tableau\(x\)/).waitFor({ timeout: 8_000 });
-  if (await page.getByRole("button", { name: "Racine" }).count()) await backToRoot();
-  await card("Dossier clic droit").click();
-  await card("Canvas dedans").waitFor({ timeout: 8_000 });
-  check("le canvas créé par clic droit vit dans le dossier", true);
+  check("le canvas créé par clic droit vit dans le dossier", (await card("Canvas dedans").count()) === 1);
   await backToRoot();
 
   /* 9 — glisser-déposer de fichiers sur une carte canvas (v1.6.3) : le dépôt
@@ -277,14 +249,15 @@ try {
   const target = page.locator('div.cursor-pointer', { hasText: "Canvas clic droit" }).first();
   await target.dispatchEvent("dragenter", { dataTransfer: dt });
   await target.dispatchEvent("dragover", { dataTransfer: dt });
-  check("survol : l'anneau « Déposer » apparaît sur la carte", await page.getByText(/Déposer dans « Canvas clic droit »/).isVisible());
+  check("survol : l'anneau « Ranger dans » apparaît sur la carte", await page.getByText(/Ranger dans « Canvas clic droit »/).isVisible());
   await target.dispatchEvent("drop", { dataTransfer: dt });
   await page.getByText(/1 fichier\(s\) déposé\(s\) dans « Canvas clic droit »/).waitFor({ timeout: 10_000 });
   check("drop sur la carte → fichier créé DANS ce canvas (notice nommée)", true);
   await page.screenshot({ path: `${SHOT_DIR}/v163-drop-carte.png` });
 
-  /* 10 — un dossier n'intercepte PAS le dépôt : le survol retombe sur le fond
-     (le dépôt irait à l'atelier) — jamais un anneau « Déposer dans » SUR le dossier. */
+  /* 10 — un dossier n'intercepte PAS le dépôt de FICHIERS : le survol retombe sur
+     le fond (le dépôt irait à l'atelier) — jamais un anneau sur le dossier pour
+     des fichiers (l'API les refuse : « un dossier ne reçoit pas de fichier »). */
   await page.evaluate(() => {
     const transfer = new DataTransfer();
     transfer.items.add(new File(["x"], "survol-dossier.txt", { type: "text/plain" }));
@@ -293,9 +266,24 @@ try {
     card.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
   });
   await page.waitForTimeout(200);
-  check("dragover sur une carte dossier : pas d'anneau sur la carte", (await page.getByText("Déposer dans « Dossier clic droit »").count()) === 0);
+  check("dragover fichiers sur une carte dossier : pas d'anneau sur la carte", (await page.getByText("Ranger dans « Dossier clic droit »").count()) === 0);
   // le fond reprend le relais : la bannière nomme le réceptacle du niveau (l'atelier ici)
   check("le fond reprend le relais (dépôt irait à l'atelier)", await page.getByText(/Lâchez pour déposer dans « Atelier »/).isVisible());
+
+  /* 10 bis — le DROIT d'un dossier, lui, accepte un tableau : le glisser d'une
+     carte sur une carte dossier le RANGE dedans. Le geste existait déjà (la carte
+     était `draggable`) mais aucun drop ne consommait la donnée : le curseur de
+     déplacement s'affichait et rien ne se passait. */
+  await page.evaluate(() => {
+    const transfer = new DataTransfer();
+    transfer.setData("application/x-canvas-id", "inconnu-à-ce-niveau");
+    transfer.setData("text/plain", "Dossier clic droit");
+    const cards = [...document.querySelectorAll('div.cursor-pointer')];
+    const card = cards.find((el) => el.textContent.includes("Dossier clic droit"));
+    card.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  });
+  await page.waitForTimeout(200);
+  check("dragover d'une carte sur un dossier : l'anneau « Ranger dans » apparaît", await page.getByText("Ranger dans « Dossier clic droit »").isVisible());
 
   /* 12 — LE scénario signalé (v1.6.3-bis) : « dans l'Atelier, le clic droit
      crée à la racine ». En vue plan de l'atelier : le menu du fond doit nommer
@@ -317,8 +305,8 @@ try {
   const created = (await fetch(`${BASE}/api/explorer`).then((r) => r.json())).canvases;
   check("le dossier créé par clic droit VIT dans l'atelier", created.some((c) => c.label === "Dossier dans l'atelier" && c.parent_id === "canvas-atelier"), JSON.stringify(created.find((c) => c.label === "Dossier dans l'atelier")));
   // la création d'un dossier fait ENTRER dedans (comportement standard) : le plan
-  // s'est refermé — remonter à la racine puis rouvrir le plan de l'atelier
-  await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
+  // s'est refermé — revenir à la racine puis rouvrir le plan de l'atelier
+  await currentLevel("Dossier dans l'atelier").waitFor({ timeout: 8_000 });
   await backToRoot();
   await page.locator('div.cursor-pointer', { hasText: "Atelier" }).first().click();
   await page.getByRole("heading", { name: /Atelier/ }).waitFor({ timeout: 8_000 });
@@ -343,7 +331,7 @@ try {
   await page.locator('div.cursor-pointer', { hasText: "Atelier" }).first().click();
   await page.getByRole("heading", { name: /Atelier/ }).waitFor({ timeout: 8_000 });
   await page.getByRole("button", { name: /Contenu \(/ }).click();
-  await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
+  await currentLevel("Atelier").waitFor({ timeout: 8_000 });
   check("« Contenu (n) » montre ce que le canvas range", await card("Dossier dans l'atelier").count() === 1);
   await deleteCanvas("Dossier dans l'atelier");
   await backToRoot();
@@ -372,7 +360,7 @@ try {
   await deleteCanvas("Canvas clic droit"); // à la racine
   // « Canvas dedans » vit DANS « Dossier clic droit » : entrer, supprimer, sortir
   await card("Dossier clic droit").click();
-  await page.getByRole("button", { name: "Racine" }).waitFor({ timeout: 8_000 });
+  await currentLevel("Dossier clic droit").waitFor({ timeout: 8_000 });
   await deleteCanvas("Canvas dedans");
   await backToRoot();
   await deleteCanvas("Dossier clic droit");

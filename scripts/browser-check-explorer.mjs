@@ -34,6 +34,10 @@ const CHROME = "C:/Users/timot/AppData/Local/ms-playwright/chromium-1208/chrome-
 const PANEL = '[role="dialog"][aria-label="Détail"]';
 /** La carte d'un tableau : plus de `title`, on cible sa classe de carte cliquable. */
 const CARD = "div.cursor-pointer";
+/** Une carte par son nom. */
+const card = (label) => page.locator(CARD, { hasText: label }).first();
+/** Le niveau affiché, tel que le chemin le nomme. */
+const currentLevel = (label) => page.locator('[aria-current="page"]', { hasText: label });
 
 const results = [];
 const check = (name, ok, detail = "") =>
@@ -47,6 +51,20 @@ page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
 page.on("requestfailed", (r) => failedRequests.push(`${r.url()} ${r.failure()?.errorText ?? ""}`));
 
 try {
+  /* 0 — le check écrit (crée, supprime) : un run interrompu en plein parcours
+     laisse ses tableaux, et le run suivant les retrouve en double (les
+     suppressions ciblent `.first()`). On repart donc d'un état propre,
+     comme le fait déjà le check imbriqué. */
+  for (const label of ["Canvas du check", "Tableau de check", "Dossier de check"]) {
+    for (;;) {
+      const snap = await fetch(`${BASE}/api/explorer`).then((r) => r.json());
+      const hit = snap.canvases.find((c) => c.label === label);
+      if (!hit) break;
+      const del = await fetch(`${BASE}/api/canvases?id=${encodeURIComponent(hit.id)}`, { method: "DELETE" });
+      if (!del.ok) break;
+    }
+  }
+
   await page.goto(`${BASE}/explorer`, { waitUntil: "networkidle" });
 
   /* 1 — la coquille : la sidebar navigation, et UNE SEULE colonne de contenu.
@@ -125,25 +143,70 @@ try {
 
   /* 7 — création d'un tableau (modale) puis suppression avec dialogue natif.
      v1.6.2 : on crée un **canvas** (« Nouveau canvas »), et le bouton de la
-     modale est « Créer le canvas ». */
+     modale est « Créer le canvas ».
+     v1.6.4 : la création **ne saute plus dans le plan** du canvas neuve (vide,
+     sans frame, sans objet) — on reste dans le niveau affiché, la carte y est
+     visible, et une notice nomme la destination. */
   await page.getByRole("button", { name: "Nouveau canvas" }).first().click();
+  await page.getByText(/dans la racine/).waitFor({ timeout: 8_000 });
+  check("la modale nomme sa destination", true);
   await page.getByLabel("Nom").fill("Tableau de check");
   await page.getByRole("button", { name: "Créer le canvas" }).click();
-  // la création réussit → l'écran ouvre le canvas (h1 = son nom), snapshot rechargé
-  await page.getByRole("heading", { name: "Tableau de check" }).waitFor({ timeout: 8_000 });
-  check("création → canvas ouvert (h1 = nouveau tableau)", true);
-  // retour à la grille : la carte est là (le snapshot a bien été rechargé)
-  await page.getByRole("button", { name: "Tableaux" }).click();
-  const card = page.locator(CARD, { hasText: "Tableau de check" });
-  await card.waitFor({ timeout: 8_000 });
-  check("snapshot rechargé → la carte est dans la grille", (await card.count()) === 1);
+  const created = page.locator(CARD, { hasText: "Tableau de check" });
+  await created.waitFor({ timeout: 8_000 });
+  check("création → la carte du canvas neuve est dans la grille (pas de saut dans le plan)", true);
+  check("création → une notice nomme la destination", (await page.getByText(/« Tableau de check » créé dans/).count()) >= 1);
+  check("création → on n'a pas quitté la grille", (await page.getByRole("heading", { name: "Tableau de check" }).count()) === 0);
   page.once("dialog", (d) => d.accept());
-  await card.hover();
-  await card.locator('button[title="Supprimer"]').click();
+  await created.hover();
+  await created.locator('button[title="Supprimer"]').click();
   await page.getByText(/supprimé/).waitFor({ timeout: 8_000 });
+  // la notice s'affiche **avant** que le snapshot rechargé ait re-rendu la
+  // grille : la carte peut rester là une frame de plus — on attend qu'elle parte
+  await created.waitFor({ state: "detached", timeout: 8_000 }).catch(() => {});
   const gone = await page.locator(CARD, { hasText: "Tableau de check" }).count();
   check("suppression → notice + carte sortie", gone === 0, `${gone} carte(s) restante(s)`);
   await page.screenshot({ path: `${SHOT_DIR}/v16-apres-suppression.png` });
+
+  /* 8 — le chemin : à la racine il dit « Tableaux », dans un dossier il nomme le
+     dossier et propose la remontée ; un niveau vide propose les deux créations.
+     On crée le dossier pour aller le voir (la fixture n'a que des canvas). */
+  await page.getByRole("button", { name: "Nouveau dossier" }).first().click();
+  await page.getByLabel("Nom").fill("Dossier de check");
+  await page.getByRole("button", { name: "Créer le dossier" }).click();
+  // un dossier créé fait ENTRER dedans : le chemin doit le nommer
+  await page.locator('[aria-current="page"]', { hasText: "Dossier de check" }).waitFor({ timeout: 8_000 });
+  check("dossier créé → on entre dedans, le chemin le nomme", true);
+  check("un niveau vide propose les deux créations", (await page.getByRole("button", { name: "Nouveau dossier" }).count()) >= 1);
+  check("un niveau vide le dit", (await page.getByText(/« Dossier de check » est vide/).count()) >= 1);
+  // un canvas créé DANS ce dossier ne fait pas sauter dans son plan
+  await page.getByRole("button", { name: "Nouveau canvas" }).first().click();
+  await page.getByText(/dans « Dossier de check »/).waitFor({ timeout: 8_000 });
+  check("la modale nomme le dossier réel", true);
+  await page.getByLabel("Nom").fill("Canvas du check");
+  await page.getByRole("button", { name: "Créer le canvas" }).click();
+  await page.locator(CARD, { hasText: "Canvas du check" }).waitFor({ timeout: 8_000 });
+  check("canvas créé dans le dossier → sa carte est là, on n'a pas quitté le dossier", (await page.locator('[aria-current="page"]', { hasText: "Dossier de check" }).count()) === 1);
+  await page.getByRole("button", { name: "Tableaux" }).first().click();
+  await page.getByText(/\d+ tableau\(x\)/).waitFor({ timeout: 8_000 });
+  check("« Tableaux » du chemin → retour à la racine", true);
+  // nettoyage de l'arbre du check : le canvas vit DANS le dossier, donc on y
+  // entre pour le supprimer, puis on supprime le dossier depuis la racine
+  const drop = async (label) => {
+    const c = page.locator(CARD, { hasText: label }).first();
+    await c.hover();
+    page.once("dialog", (d) => d.accept());
+    await c.locator('button[title="Supprimer"]').click();
+    await page.getByText(/supprimé/).waitFor({ timeout: 8_000 });
+    await c.waitFor({ state: "detached", timeout: 8_000 }).catch(() => {});
+  };
+  await card("Dossier de check").click();
+  await currentLevel("Dossier de check").waitFor({ timeout: 8_000 });
+  await drop("Canvas du check");
+  await page.getByRole("button", { name: "Tableaux" }).first().click();
+  await page.getByText(/\d+ tableau\(x\)/).waitFor({ timeout: 8_000 });
+  await drop("Dossier de check");
+  check("nettoyage : l'arbre du check est parti", (await page.locator(CARD, { hasText: "Dossier de check" }).count()) === 0);
 } catch (e) {
   check("ERREUR de parcours", false, e.message);
 } finally {
@@ -152,7 +215,11 @@ try {
 
 let failed = 0;
 check("0 erreur console", consoleErrors.length === 0, consoleErrors.join(" | "));
-check("0 requête en échec", failedRequests.length === 0, failedRequests.join(" | "));
+// Les préfetch Next (`?_rsc=`) abandonnés par la navigation suivante sont
+// bénins — même filtre que le check imbriqué, même raison : un lien préchargé
+// puis annulé par le clic suivant n'est pas une requête en échec de l'app.
+const realFailures = failedRequests.filter((r) => !r.includes("_rsc="));
+check("0 requête en échec", realFailures.length === 0, realFailures.join(" | "));
 // Pas de double comptage ici : la boucle ci-dessous recompte chaque check en
 // échec (cf. le même défaut, corrigé dans browser-check-explorer-nested.mjs).
 for (const r of results) {

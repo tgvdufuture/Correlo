@@ -1,4 +1,65 @@
-# Project Progress — Sérendipité (PRD v1.2 + amendements v1.3, v1.6 & v1.7)
+# Project Progress — Sérendipité (PRD v1.2 + amendements v1.3, v1.6, v1.7 & v1.8)
+
+## v1.8 — la grille « tableaux » : créer sans deviner (2026-10-02)
+
+Grief : « dans un dossier, créer des dossiers et des canvas, c'est le bord ». Périmètre arbitré
+avec l'utilisateur : **la grille + les modales de création** (la vue plan d'un canvas n'est pas
+touchée). Gestes retenus : le **clic droit** et le **glisser-déposer** — pas de bouton « + »
+unifié, pas de menu « … » par carte.
+
+- [x] **Quatre bugs réels, tous trouvés dans le code avant d'écrire une ligne** :
+  - [x] **Le niveau fantôme** (`explorer-screen.tsx`) : après une suppression, `remove()` vérifiait
+    `browseInId` contre `canvases` — la closure du rendu **précédent**, où le tableau supprimé
+    figurait encore. Le test disait « il existe », `browseInId` gardait l'id mort, et la grille
+    restait **bloquée sur un niveau vide, sans chemin pour en sortir**. `browseIn` est désormais
+    **dérivé du snapshot** (`levelId`) : un tableau supprimé ou déplacé fait retomber la grille à
+    la racine tout seul. Le filet de suppression a disparu — il ne corrigeait rien.
+  - [x] **Le dépôt de fichiers dans un dossier** : le fond de l'écran visait `browseInId` sans
+    regarder sa nature. Visitor un dossier et lâcher un fichier affichait « Lâchez pour déposer
+    dans « MonDossier » » puis se faisait refuser par l'API (`canvas_est_dossier`, 400). Le
+    réceptacle du fond est désormais **`backdropReceptacle`** : le canvas ouvert, sinon le niveau
+    s'il est un canvas, sinon l'atelier — la bannière et le dépôt nomment la même cible.
+  - [x] **Le glisser de carte qui ne faisait rien** : la carte était `draggable` et posait
+    `application/x-canvas-id`, mais **aucun drop ne consommait la donnée** — le curseur de
+    déplacement s'affichait, le geste ne aboutissait pas. Une carte lâchée sur une autre carte
+    **la range dedans** ; lâchée sur le fond, **dans le niveau affiché** (l'atelier n'est pas
+    déplaçable : `draggable={!c.is_default}`). Le survol affiche « Ranger dans « … » ».
+  - [x] **La création d'un canvas qui sautait dans le plan vide** : on perdait le dossier d'où
+    l'on venait pour un plan sans frame ni objet. Un **dossier** créé fait toujours entrer dedans ;
+    un **canvas** créé **reste dans le niveau**, sa carte y est visible, et une notice nomme la
+    destination (« « Veille » créé dans « MonDossier » »).
+- [x] **La destination est dite partout, par un seul libellé** (`hereLabel`) : le bandeau
+  (`title`), le menu contextuel du fond (« Créer dans « MonDossier » » » / « Créer à la racine »
+  — plus l'ambigu « Créer ici ») et **la modale** (« dans « MonDossier » » »), qui mentait
+  « (dans le dossier visité) » dès qu'on passait par le clic droit sur une carte.
+- [x] **La grille** : le **chemin est toujours affiché** (`nav aria-label="Chemin"`, segment
+  courant en `aria-current="page"`) — avant il n'existait qu'à l'intérieur d'un dossier ; les
+  **comptes sont ceux du niveau** (« 3 élément(s) ici · 12 tableau(x) ») ; les **deux tuiles en
+  pointillés de fin de grille ont disparu** (doublon des deux boutons, invisibles dès que la
+  grille dépassait un écran) et sont remplacées par un **état vide actionnable** ; le retour
+  d'un plan **nomme le niveau** d'où l'on vient au lieu de « Dossier » ou « Tableaux » au hasard.
+- [x] **La carte est au clavier** : `role="button"`, `tabIndex`, ouverture par Entrée/Espace
+  (`e.target !== e.currentTarget` : sinon « Supprimer » ouvrirait aussi le tableau), barre
+  d'actions révélée au `focus-within` comme au survol.
+- [x] **Vérifié au navigateur, sur la fixture jetable** (`data/eval/v16-check.db`, serveur
+  `next start -p 3224`, base réelle vérifiée intacte après coup : 5 tableaux / 29 items /
+  8 conversations) :
+  - `browser-check-explorer.mjs` : **30/30 PASS** (contre 21/21 avant — 9 checks ajoutés :
+    destination nommée par la modale, pas de saut dans le plan, notice, chemin, état vide,
+    création dans un dossier). Il a reçu un **pré-nettoyage** : sans lui, un run interrompu
+    laissait ses tableaux et le suivant les trouvait en double.
+  - `browser-check-explorer-nested.mjs` : **32/32 PASS** (contre 29/30). Le check du survol
+    d'une carte sur un dossier est **nouveau** (le geste qui ne marchait pas).
+  - `browser-check-inspector.mjs` : **23/23 PASS** (inchangé, il ne touche pas la grille).
+  - ⚠ **L'erreur console `` `NaN` is an invalid value for the `left` css style property``,
+    ouverte depuis la v1.6.1 et jamais reproduite, n'apparaît plus** sur aucun des trois
+    checks. Cause jamais isolée : elle ne se Trigger plus du tout, donc elle est **corrigée par
+    effet de bord**, pas par une preuve — à surveiller si elle revient.
+  - **540/540** ✓ · typecheck ✓ · lint ✓ · `npm run build` ✓.
+- [ ] **Non fait, et volontaire** : la vue plan d'un canvas (la vignette et le **bug `NaN`** si
+  elle revient), les calages `bg-foreground/30` des modales hors création (défaut connu : en
+  thème sombre le voile **éclaircit** au lieu d'assombrir), le menu « … » par carte, et une
+  **destination choisir** dans la modale (elle ne fait que dire où elle va créer).
 
 ## v1.7 — l'agent en prose, et l'app habitée (2026-10-01)
 

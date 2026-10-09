@@ -6,6 +6,9 @@ import { countReplacementChars, decodeHtmlPage, decodeTextBytes } from "@/lib/in
 import { stripGutenbergBoilerplate } from "@/lib/ingest/boilerplate";
 
 /** PDF sans texte extractible. */
+/** Balise de structure : un document HTML commence par l'une d'elles. */
+const HTML_STRUCTURE = /<\s*(!doctype\s+html|html|head|body|svg|table)\b/i;
+
 export class PdfNoTextError extends Error {
   constructor() {
     super("texte non extractible");
@@ -35,6 +38,25 @@ export interface PdfPage {
 export function parseTextBuffer(buf: Buffer): string {
   const { text } = decodeTextBytes(new Uint8Array(buf), null);
   const decoded = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  // Un fichier HTML **déposé** n'est pas du texte : sans cette branche, un `.htm`
+  // passait en `type: "TEXT"` et était indexé **tel quel**, balises et tout. Mesuré le
+  // 2026-10-02 sur le corpus réel : `UserDiag − Acer Nitro AN515-58 (Laptop).htm`, un
+  // dump de diagnostic, y a laissé **988 fragments** de coordonnées SVG
+  // (`42.49163428103907 70.75447113934685`) — 496 sans un seul mot de 4 lettres. C'est le
+  // plus gros fichier du corpus (1,9 Mo) et il aspirait le voisinage d'embeddings : deux
+  // des cinq étapes d'un tour réel ont été consommées par ce bruit. Le chemin **URL**
+  // nettoyait déjà (`SKIP_TAGS` porte `SVG`) ; c'est le dépôt qui ne le faisait pas.
+  if (looksLikeHtml(decoded)) {
+    const extracted = extractHtmlText(decoded);
+    if (extracted.text.trim().length > 0) {
+      console.info(
+        `[ingest] HTML déposé converti en texte (Readability) : ${decoded.length} → ${extracted.text.length} caractères`
+      );
+      return extracted.text;
+    }
+    // extraction vide : on rend le texte brut plutôt que de perdre le document
+    console.warn("[ingest] HTML déposé sans texte extractible — indexation du brut");
+  }
   // Un .txt issu de Project Gutenberg porte le même boilerplate qu'une page URL :
   // licence et en-tête/pied ne doivent pas devenir du contenu indexé.
   const cleaned = stripGutenbergBoilerplate(decoded);
@@ -44,6 +66,36 @@ export function parseTextBuffer(buf: Buffer): string {
     );
   }
   return cleaned.text;
+}
+
+/**
+ * Un tampon est-il du HTML **et non** du texte qui en parle ?
+ *
+ * Trois conditions, cumulées, parce que chacune seule a un faux positif mesuré :
+ *  1. une balise de **structure** dans les premiers 4 000 caractères (`html`, `body`,
+ *     `svg`, `table`…) — un document sans structure n’est pas indexable comme page ;
+ *  2. au moins quatre balises ouvrantes ;
+ *  3. un **ratio de balises fermantes** supérieur à la moitié.
+ *
+ * La densité de balises **ne discrimine pas**, et deux seuils l’ont démontré sur les
+ * documents réels qui décident du cas (dump de diagnostic de 1,58 Mo contre un cours de
+ * HTML de 529 caractères) : 1 balise pour 232 caractères d’un côté, 1 pour 176 de l
+ * autre — trop proches. Un seuil à 400 laissait passer le cours de HTML ; un seuil à 100
+ * rejetait le vrai diagnostic. Le ratio, lui, les sépare par deux ordres de grandeur :
+ *
+ *   - dump de diagnostic : 6 824 ouvrantes, 6 410 fermantes -> **0,94**
+ *   - cours de HTML citant les balises : 3 ouvrantes, **0** fermante -> **0,00**
+ *
+ * Un document referme ses conteneurs ; un texte qui en parle n’ouvre rien.
+ */
+function looksLikeHtml(text: string): boolean {
+  const head = text.slice(0, 4_000);
+  const structured = HTML_STRUCTURE.test(head);
+  if (!structured) return false;
+  const opens = (text.match(/<[a-z][^>]*>/gi) ?? []).length;
+  if (opens < 4) return false;
+  const closes = (text.match(/<\/[a-z][^>]*>/gi) ?? []).length;
+  return closes / opens >= 0.5;
 }
 
 /** Extraction des pages d'un PDF (pdf-parse). */
@@ -113,6 +165,19 @@ export async function extractUrlText(
     clearTimeout(timer);
   }
 
+  return extractHtmlText(html, url);
+}
+
+/**
+ * HTML → texte, **partagé** par les deux chemins d'ingestion (page URL et fichier déposé).
+ *
+ * Un seul code de nettoyage pour les deux : c'est la condition pour qu'un `.htm` déposé
+ * et la même page récupérée par URL produisent le même texte — donc des fragments
+ * comparables et un diagnostic reproductible. La factorisation vient du défaut mesuré le
+ * 2026-10-02 : le chemin URL écartait déjà le SVG (`SKIP_TAGS`), le chemin dépôt non, et
+ * 988 fragments de coordonnées d'un diagnostic machine sont entrés dans le corpus.
+ */
+export function extractHtmlText(html: string, url = "file:///depot"): UrlExtraction {
   const dom = new JSDOM(html, { url });
   const article = new Readability(dom.window.document).parse();
   let text = "";

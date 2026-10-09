@@ -76,6 +76,7 @@ npm run dev                  # http://localhost:3000/ (l'atelier)
 | `AUTO_DISCOVER_BATCH_SIZE` | `4` | Paires par appel LLM |
 | `AUTO_DISCOVER_MAX_FRAGMENT_CHARS` | `2400` | Troncature des fragments dans le prompt |
 | `AUTO_DISCOVER_INTER_BATCH_DELAY_MS` | `65000` | Pause entre deux lots (fenêtre de quota du provider) |
+| `WORKSPACE_ROOT` | — | Racine **unique** des fichiers que l'agent peut lire (`read_file`, Phase 6). Vide ⇒ l'outil n'existe pas |
 
 Sans `GROQ_API_KEY` : l'ingestion et les embeddings fonctionnent ; le résumé de
 source passe en `failed` avec `missing_groq_api_key` (visible dans la
@@ -228,6 +229,19 @@ L'identité d'un run discover — `run_id`, `corpus_hash`, `seed`, `sampler_vers
 persistée dans la table `discover_runs` (migration 005). Relancer le même `--run-id`
 **rejoue le même run** (mêmes paires, mêmes prompts) au lieu d'en créer un autre.
 
+### Suivre un tour de conversation pendant qu'il tourne
+
+La trace de l'agent s'ouvre **tant que la réponse est en attente** : les étapes,
+les fragments ajoutés, les pages web lues ou refusées, les compteurs de budget. Un
+tour **terminé** se replie — le bruit d'un tour achevé n'a pas sa place au milieu
+de la lecture.
+
+Le repli a été mesuré faux : le tour réel du 2026-10-02 (8 appels LLM,
+4 min 45) a laissé l'écran affiché un texte d'attente **identique pendant toute
+sa durée**, alors que la trace était déjà écrite en base à chaque étape et
+servie par l'API. Le travail était fait, il était invisible. Le texte d'attente est
+désormais tiré des compteurs du tour : le budget se remplit sous les yeux.
+
 ## Architecture
 
 - **Base** : SQLite via `better-sqlite3` (WAL, `foreign_keys = ON`), schéma
@@ -285,6 +299,25 @@ persistée dans la table `discover_runs` (migration 005). Relancer le même `--r
   chaque lecture (`prune`). Les liens ne sont **pas** stockés : ce sont les
   suggestions du feed, dessinées entre les fichiers qu'elles relient
   (`review-service.linksFor`).
+
+### HTML déposé ≠ texte
+
+Un fichier `.htm`/`.html` **déposé** est converti en texte avant d'être indexé : balises
+écartées, `<svg>`/`<script>`/`<style>` supprimés. Le chemin **URL** le faisait déjà ; le
+dépôt, non — un diagnostic machine est alors entré tel quel dans le corpus. Mesuré sur le
+corpus réel : `UserDiag − Acer Nitro AN515-58 (Laptop).htm` y laissait **988 fragments** de
+coordonnées SVG, dont 496 sans un seul mot de quatre lettres — le plus gros fichier du
+corpus, et il aspirait le voisinage d'embeddings de tout le reste. Après correctif : **17
+fragments**, tout le bruit supprimé.
+
+La reconnaissance est délibérément stricte, pour qu'un `.txt` qui *parle* de HTML reste du
+texte. Le discriminant mesuré n'est **pas** la densité de balises (1 pour 232 caractères
+pour le diagnostic, 1 pour 176 pour un cours de HTML — trop proches pour un seuil) mais le
+**ratio de balises fermantes** : **0,94** pour le premier, **0,00** pour le second. Un
+document referme ses conteneurs, un texte qui en parle n'ouvre rien.
+
+> Un fichier déjà ingéré **conserve** ses fragments : le correctif s'applique aux prochains
+> dépôts. Le ré-ingérer est le seul chemin pour le nettoyer.
 
 ## Local-first
 

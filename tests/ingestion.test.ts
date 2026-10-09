@@ -6,6 +6,7 @@ import { createFragmentsRepo } from "@/lib/repositories/fragments";
 import { createJobsRepo, idempotencyKey } from "@/lib/repositories/jobs";
 import { IngestService, type AutoDiscoverSettings } from "@/lib/ingest/ingest-service";
 import { CHUNKER_VERSION, chunkText } from "@/lib/ingest/chunker";
+import { parseTextBuffer } from "@/lib/ingest/parsers";
 import { decodeEmbedding } from "@/lib/llm/embedding-codec";
 import { sha256Hex } from "@/lib/hash";
 
@@ -386,5 +387,63 @@ describe("découverte automatique après dépôt", () => {
       await runIngestOf(jobs, ingest, b);
       expect(discoverJobs(db)).toHaveLength(0);
     }
+  });
+});
+/**
+ * Un fichier **HTML déposé** n'est pas du texte (défaut mesuré le 2026-10-02).
+ *
+ * Le chemin URL nettoyait déjà le HTML (`SKIP_TAGS` porte `SVG`) ; un `.htm` déposé passait
+ * par `type: "TEXT"` → `parseTextBuffer` et était indexé **tel quel**. Sur le corpus réel,
+ * un dump de diagnostic a produit **988 fragments** de coordonnées SVG — le plus gros
+ * fichier du corpus, et deux des cinq étapes d'un tour de conversation consommées par ce
+ * bruit. Ces tests verrouillent la branche et, surtout, son **adversaire** : un `.txt` qui
+ * parle de HTML doit rester du texte.
+ */
+describe("fichier HTML déposé (et non indexé comme du texte)", () => {
+  const svgDump = `<!DOCTYPE html><html><head><title>UserDiag</title></head><body>
+    <h1>Diagnostic machine</h1>
+    <p>Mémoire physique utilisée : 14237 Mo sur 15562 Mo.</p>
+    <svg width="800" height="600">
+      <path d="M 42.49163428103907 70.75447113934685 C 39.07 69.14 42.49 70.75 46.36" />
+      <path d="M 96.68119999999999 431.67141512702494 C 96.68 431.67 433.28 434.89" />
+      <path d="M 169.64933333333332 184.91228618397432 C 169.64 184.91 172.17 186.36" />
+    </svg>
+    <script>var x = 1;</script>
+    <style>path { fill: red; }</style>
+    <p>Charge processeur : 62 pour cent.</p>
+  </body></html>`;
+
+  it("écarte les coordonnées SVG et ne garde que le texte lisible", () => {
+    const text = parseTextBuffer(Buffer.from(svgDump, "utf8"));
+    expect(text).toContain("Mémoire physique utilisée");
+    expect(text).toContain("Charge processeur");
+    expect(text).not.toContain("42.49163428103907");
+    expect(text).not.toContain("96.68119999999999");
+    expect(text).not.toContain("169.64933333333332");
+  });
+
+  it("réduit le volume indexé (le défaut mesuré : 988 fragments pour ce fichier)", () => {
+    const raw = svgDump.length;
+    const cleaned = parseTextBuffer(Buffer.from(svgDump, "utf8"));
+    // le HTML doit perdre l'essentiel de son volume : balises, attributs et tracés
+    expect(cleaned.length).toBeLessThan(raw / 2);
+    expect(cleaned).not.toContain("<svg");
+    expect(cleaned).not.toContain("<path");
+  });
+
+  it("un .txt qui PARLE de HTML reste du texte (faux positif interdit)", () => {
+    const prose = `Voici un exemple de balise : <html> et <body> et <table>.
+      Le fichier explique les balises mais ne contient pas de document HTML.
+      Il fait plusieurs centaines de mots pour que la densité de balises reste faible
+      et que le test ait du sens : une balise pour mille caractères ne suffit pas
+      à faire croire à un document, sinon un simple cours de HTML serait réécrit
+      par le parseur DOM et perdrait sa ponctuation d'origine.
+      Il faut donc beaucoup de texte ordinaire autour des quelques balises citées.`;
+    expect(parseTextBuffer(Buffer.from(prose, "utf8"))).toBe(prose);
+  });
+
+  it("un texte ordinaire sans aucune balise est inchangé", () => {
+    const plain = "Le bus passe à Orme à 6 h 36, puis à Pont Rigoles à 6 h 37.\nIl continue vers Roanne.";
+    expect(parseTextBuffer(Buffer.from(plain, "utf8"))).toBe(plain);
   });
 });

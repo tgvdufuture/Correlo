@@ -190,18 +190,43 @@ export function ExplorerScreen() {
    * Le niveau affiché (v1.6.2 : les dossiers) : les enfants du dossier visité —
    * **sous-dossiers et canvas mélangés**, comme un explorateur de fichiers — ou
    * les racines. Le tri met les dossiers d'abord (convention universelle).
+   *
+   * `browseIn` est **dérivé du snapshot**, jamais une copie de l'état : un
+   * tableau supprimé (ou déplacé ailleurs) fait donc disparaître le niveau
+   * fantôme **tout seul** — la grille retombe à la racine au lieu d'afficher un
+   * niveau vide dont on ne peut plus sortir. L'ancien code vérifiait
+   * `browseInId` contre `canvases` juste après une suppression, mais dans la
+   * closure du rendu **précédent** : le tableau supprimé y figurait encore, le
+   * test disait « il est là » et l'écran restait bloqué sur un id mort.
+   * `levelId` est la seule adresse que la grille utilise ensuite.
    */
+  const browseIn = browseInId ? canvases.find((c) => c.id === browseInId) ?? null : null;
+  /** Le niveau réellement affiché — `null` = la racine. Tout passe par là. */
+  const levelId = browseIn?.id ?? null;
   const level = useMemo(() => {
-    const children = canvases.filter((c) => (browseInId ? c.parent_id === browseInId : !c.parent_id));
+    const children = canvases.filter((c) => (levelId ? c.parent_id === levelId : !c.parent_id));
     return [...children].sort((a, b) =>
       a.kind === b.kind ? 0 : a.kind === "folder" ? -1 : 1
     );
-  }, [canvases, browseInId]);
-  const browseIn = browseInId ? canvases.find((c) => c.id === browseInId) ?? null : null;
+  }, [canvases, levelId]);
   /** La cible des dépôts « à côté des cartes » : l'atelier (le réceptacle).
    *  Déduit du snapshot (`is_default`) — la constante serveur vit dans un module
    *  node, jamais importable côté client. */
   const atelierId = canvases.find((c) => c.is_default)?.id ?? null;
+  /**
+   * Le réceptacle du dépôt fait sur le **fond** de l'écran : le canvas ouvert,
+   * sinon le niveau affiché s'il est un canvas, sinon l'atelier.
+   *
+   * Un **dossier n'est jamais un réceptacle** : l'API le refuse nommément
+   * (`canvas_est_dossier`, 400). L'ancien code visait `browseInId` sans regarder
+   * sa nature — Visitor un dossier et lâcher un fichier Bannerait « Lâchez pour
+   * déposer dans « MonDossier » » puis se faisait refuser. Ici on annonce la
+   * vraie cible (l'atelier), donc le geste aboutit.
+   */
+  const backdropReceptacle = useMemo(() => {
+    const id = open?.id ?? (browseIn?.kind === "canvas" ? browseIn.id : null) ?? atelierId;
+    return canvases.find((c) => c.id === id) ?? null;
+  }, [open, browseIn, atelierId, canvases]);
   /** Le chemin de « Entrer » (le fil d'Ariane de la grille), racine d'abord. */
   const browseTrail = useMemo(() => {
     const trail: Snapshot["canvases"] = [];
@@ -212,6 +237,20 @@ export function ExplorerScreen() {
     }
     return trail;
   }, [browseIn, canvases]);
+  /**
+   * **Où l'on est, en mots** — « la racine » ou « « MonDossier » ». Partagé par
+   * les titres des boutons, le menu contextuel et la modale : un seul libellé
+   * pour une seule destination, donc jamais trois formulations qui divergent.
+   */
+  const hereLabel = browseIn ? `« ${browseIn.label} »` : "la racine";
+  /**
+   * La destination de la modale de création, déduite du parent demandé — pas du
+   * niveau affiché : le clic droit sur une carte vise **cette carte**, même si on
+   * regarde ailleurs. Un parent inconnu ne peut pas arriver (l'écran le tire du
+   * snapshot), mais le filet reste : on dit « la racine » plutôt que `undefined`.
+   */
+  const newDestination =
+    (newParentId ? `« ${canvases.find((c) => c.id === newParentId)?.label ?? newParentId} »` : hereLabel) ?? "la racine";
   /**
    * Les cibles de « Déplacer vers » : **tous les autres tableaux** (v1.6.3 —
    * n'importe quel tableau range : l'atelier, un canvas, un dossier), sauf soi
@@ -387,12 +426,11 @@ export function ExplorerScreen() {
         }
       }
     );
-    // le niveau visité peut être le tableau supprimé, **ou son ancêtre supprimé**
-    // (la remontée a déplacé les enfants) : on ne garde le niveau que s'il existe
-    // encore — un id orphelin laisserait une grille vide sans fil d'Ariane, sans
-    // moyen d'en sortir
-    const stillThere = canvases.some((c) => c.id === browseInId);
-    if (browseInId && !stillThere) setBrowseInId(null);
+    // Le niveau visité n'a pas besoin d'être « nettoyé » : `browseIn` est dérivé
+    // du snapshot, donc un tableau supprimé (ou déplacé) fait retomber la grille
+    // à la racine tout seul. L'ancien test `canvases.some(...)` lisait la closure
+    // du rendu **précédent** — le tableau supprimé y était encore — il disait
+    // « il existe » et laissait l'écran sur un id mort, sans chemin pour en sortir.
     if (openCanvasId === id) {
       setOpenCanvasId(null);
       setSel(null);
@@ -402,6 +440,8 @@ export function ExplorerScreen() {
   /** Déplacer le tableau sélectionné sous une cible (ou à la racine) — les refus
    *  nommés de l'API (cycle, atelier) deviennent une phrase, jamais un 500 muet. */
   const moveTo = async (id: string, target: string | null) => {
+    const moved = canvases.find((c) => c.id === id)?.label ?? "Tableau";
+    const into = target ? `« ${canvases.find((c) => c.id === target)?.label ?? "?"} »` : "la racine";
     const ok = await act(() =>
       fetch(`/api/canvases?id=${encodeURIComponent(id)}`, {
         method: "PATCH",
@@ -409,7 +449,10 @@ export function ExplorerScreen() {
         body: JSON.stringify({ parentId: target }),
       })
     );
-    if (ok) setNotice(target ? "Tableau déplacé." : "Tableau remis à la racine.");
+    // La notice nomme les deux bouts (« rangé dans »), pas « déplacé » : après un
+    // glisser-déposer, c'est la seule chose qui dit si le geste a atterri où on
+    //.cursorait. Un refus nommé de l'API (cycle, atelier) devient une phrase.
+    if (ok) setNotice(`« ${moved} » rangé dans ${into}.`);
   };
 
   if (error && !snap) {
@@ -447,73 +490,138 @@ export function ExplorerScreen() {
         className="min-w-0 flex-1 overflow-y-auto px-6 py-4"
         onContextMenu={(e) => openMenu(e, null)}
         onDragOver={(e) => {
-          const id = open?.id ?? browseInId ?? atelierId;
-          if (id && [...e.dataTransfer.items].some((i) => i.kind === "file")) {
+          // Le fond accepte deux choses : des fichiers (→ le réceptacle du
+          // niveau) et une carte (→ rangée dans le niveau affiché). Sans le
+          // second, un glisser qui finit hors d'une carte ne fait rien — le
+          // curseur de déplacement avait promis un geste.
+          if (e.dataTransfer.types.includes("application/x-canvas-id")) {
             e.preventDefault();
-            setDropOn(id);
+            return;
+          }
+          if (backdropReceptacle && [...e.dataTransfer.items].some((i) => i.kind === "file")) {
+            e.preventDefault();
+            setDropOn(backdropReceptacle.id);
           }
         }}
         onDragLeave={(e) => {
           if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropOn(null);
         }}
         onDrop={(e) => {
-          const id = open?.id ?? browseInId ?? atelierId;
-          if (e.dataTransfer.files.length > 0 && id) {
+          const moved = e.dataTransfer.getData("application/x-canvas-id");
+          // Déjà dans ce niveau : on absorbe le dépôt sans écrire (une notice
+          // « rangé dans » sur un tableau qui n'a pas bougé serait un mensonge).
+          if (moved && canvases.find((c) => c.id === moved)?.parent_id !== levelId) {
             e.preventDefault();
             setDropOn(null);
-            void uploadFiles(id, e.dataTransfer.files);
+            void moveTo(moved, levelId);
+            return;
+          }
+          if (moved) e.preventDefault();
+          if (e.dataTransfer.files.length > 0 && backdropReceptacle) {
+            e.preventDefault();
+            setDropOn(null);
+            void uploadFiles(backdropReceptacle.id, e.dataTransfer.files);
           }
         }}
       >
         {open === null ? (
           <>
-            {/* Pas de titre « Tableaux » ici : la sidebar porte déjà ce nom et
-                marque l'onglet actif — le répéter en haut donnait deux barres qui
-                disaient la même chose. Il reste les **gestes** (créer un dossier,
-                un canvas) et les **comptes**, qui ne sont nulle part ailleurs. */}
-            <div className="mb-4 flex items-baseline gap-3">
+            {/* Le CHEMIN, toujours affiché — y compris à la racine. Le lieu où
+                l'on va créer ne doit pas dépendre du fait d'être déjà entré
+                quelque part : le clic droit le disait (« Créer dans « Atelier » »),
+                les boutons ne le disaient pas. Un seul rang de création, dans le
+                niveau affiché, et son titre nomme la destination. */}
+            <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
+              <nav aria-label="Chemin" className="flex min-w-0 items-center gap-1 text-sm">
+                {browseTrail.length === 0 ? (
+                  <span className="font-medium">Tableaux</span>
+                ) : (
+                  <>
+                    <button
+                      className="rounded px-1.5 py-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                      onClick={() => setBrowseInId(null)}
+                    >
+                      Tableaux
+                    </button>
+                    {browseTrail.map((c, i) => {
+                      const last = i === browseTrail.length - 1;
+                      return (
+                        <span key={c.id} className="flex min-w-0 items-center gap-1">
+                          <span className="text-border">/</span>
+                          {last ? (
+                            <span aria-current="page" className="truncate font-medium">
+                              {c.label}
+                            </span>
+                          ) : (
+                            <button
+                              className="truncate rounded px-1.5 py-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                              onClick={() => setBrowseInId(c.id)}
+                            >
+                              {c.label}
+                            </button>
+                          )}
+                        </span>
+                      );
+                    })}
+                  </>
+                )}
+              </nav>
               <span className="text-xs text-muted-foreground">
-                {canvases.length} tableau(x) · {canvases.reduce((n, c) => n + c.totals.conversations, 0)} conversation(s)
+                {level.length} élément(s) ici · {canvases.length} tableau(x)
               </span>
               <div className="ml-auto flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => openNew("folder", browseInId)}>
-                  <FolderPlus className="mr-1 size-4" /> Dossier
+                <Button
+                  size="sm"
+                  variant="outline"
+                  title={`Nouveau dossier dans ${hereLabel}`}
+                  onClick={() => openNew("folder", levelId)}
+                >
+                  <FolderPlus className="mr-1 size-4" /> Nouveau dossier
                 </Button>
-                <Button size="sm" onClick={() => openNew("canvas", browseInId)}>
+                <Button
+                  size="sm"
+                  title={`Nouveau canvas dans ${hereLabel}`}
+                  onClick={() => openNew("canvas", levelId)}
+                >
                   <Plus className="mr-1 size-4" /> Nouveau canvas
                 </Button>
               </div>
             </div>
-            {/* le fil d'Ariane du niveau visité (v1.6.1 : les sous-tableaux) */}
-            {browseIn && (
-              <div className="mb-3 flex items-center gap-1.5 text-sm text-muted-foreground">
-                <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => setBrowseInId(null)}>
-                  <CornerUpLeft className="mr-1 size-3.5" /> Racine
-                </Button>
-                {browseTrail.map((c, i) => (
-                  <span key={c.id} className="flex items-center gap-1.5">
-                    <span className="text-border">/</span>
-                    <button
-                      className={`rounded px-1.5 py-0.5 hover:bg-muted hover:text-foreground ${i === browseTrail.length - 1 ? "font-medium text-foreground" : ""}`}
-                      onClick={() => setBrowseInId(c.id)}
-                    >
-                      {c.label}
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
             {notice && <p className="mb-3 rounded-md border border-border bg-muted/50 px-3 py-2 text-sm">{notice}</p>}
-            {(uploading > 0 || (dropOn !== null && dropOn === (browseInId ?? atelierId))) && (
+            {(uploading > 0 || (dropOn !== null && backdropReceptacle && dropOn === backdropReceptacle.id)) && (
               <p className="mb-3 rounded-md border border-dashed border-primary/50 bg-primary/5 px-3 py-2 text-sm">
                 {uploading > 0 ? (
                   <span className="flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin" /> Envoi de {uploading} fichier(s)…
                   </span>
                 ) : (
-                  `Lâchez pour déposer dans « ${canvases.find((c) => c.id === (browseInId ?? atelierId))?.label ?? "Atelier"} » — ou visez une carte pour la déposer dedans.`
+                  `Lâchez pour déposer dans « ${backdropReceptacle?.label ?? "Atelier"} » — ou visez une carte pour la déposer dedans.`
                 )}
               </p>
+            )}
+            {/* Un niveau sans rien : il doit **dire** qu'il est vide et proposer
+                les deux créations. L'ancien écran alignait deux tuiles en
+                pointillés en bas de grille — invisibles dès que la grille
+                dépassait un écran, et doublons des deux boutons du bandeau. */}
+            {level.length === 0 && (
+              <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border py-16 text-center">
+                <FolderOpen className="size-8 text-muted-foreground" />
+                <p className="text-sm font-medium">
+                  {browseIn ? `« ${browseIn.label} » est vide` : "Aucun tableau à la racine"}
+                </p>
+                <p className="max-w-sm text-xs text-muted-foreground">
+                  Un canvas reçoit les fichiers et les objets que vous y déposez ; un dossier range
+                  d&apos;autres tableaux. Clic droit dans la grille : créer ici.
+                </p>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={() => openNew("canvas", levelId)}>
+                    <Plus className="mr-1 size-4" /> Nouveau canvas
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => openNew("folder", levelId)}>
+                    <FolderPlus className="mr-1 size-4" /> Nouveau dossier
+                  </Button>
+                </div>
+              </div>
             )}
             <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
               {level.map((c) => (
@@ -522,15 +630,42 @@ export function ExplorerScreen() {
                   className={`group relative cursor-pointer rounded-xl border bg-card p-4 shadow-sm transition-shadow hover:shadow-md ${
                     dropOn === c.id ? "border-2 border-primary ring-2 ring-primary/30" : "border-border"
                   }`}
+                  /* La carte est atteignable au clavier et s'ouvre par Entrée
+                     comme au clic — un panneau d'actions qu'on ne peut pas
+                     atteindre au Tab n'existe pas pour la moitié des gens. */
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${c.kind === "folder" ? "Ouvrir le dossier" : "Ouvrir le canvas"} ${c.label}`}
+                  onKeyDown={(e) => {
+                    // Le focus peut être sur un bouton de la barre d'actions : son
+                    // Entrée est le sien, pas celui de la carte (sinon « Supprimer »
+                    // ouvrirait aussi le tableau qu'il vient de supprimer).
+                    if (e.target !== e.currentTarget) return;
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      openCard(c);
+                    }
+                  }}
                   onClick={() => openCard(c)}
                   onContextMenu={(e) => openMenu(e, c)}
-                  /* Le glisser-déposer (v1.6.3) : un canvas reçoit les fichiers
-                     directement — le cercle « ouvrez le plein écran d'abord » est
-                     mort. Un dossier n'est pas une cible : c'est un conteneur de
-                     tableaux, pas une surface. */
-                  draggable={c.kind === "canvas"}
+                  /* Deux glissers distincts, une seule carte :
+                     - des **fichiers** → dépôt dans ce canvas (les dossiers ne
+                       reçoivent pas de fichier : l'API le refuse nommément) ;
+                     - une **carte** (`application/x-canvas-id`) → ce tableau
+                       RANGE ce qu'on lui lâche dessus. Avant, la carte était
+                       `draggable` et posait la donnée, mais **aucun drop ne la
+                       consommait** : le curseur de déplacement s'affichait et
+                       rien ne se passait. Un geste qui promet doit.aboutir. */
+                  draggable={!c.is_default}
                   onDragStart={(e) => e.dataTransfer.setData("application/x-canvas-id", c.id)}
                   onDragOver={(e) => {
+                    const movesCanvas = e.dataTransfer.types.includes("application/x-canvas-id");
+                    if (movesCanvas) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setDropOn(c.id);
+                      return;
+                    }
                     if (c.kind !== "canvas") return;
                     if ([...e.dataTransfer.items].some((i) => i.kind === "file")) {
                       e.preventDefault();
@@ -542,6 +677,14 @@ export function ExplorerScreen() {
                     if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropOn((d) => (d === c.id ? null : d));
                   }}
                   onDrop={(e) => {
+                    const moved = e.dataTransfer.getData("application/x-canvas-id");
+                    if (moved && moved !== c.id) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setDropOn(null);
+                      void moveTo(moved, c.id);
+                      return;
+                    }
                     if (c.kind !== "canvas") return;
                     if (e.dataTransfer.files.length > 0) {
                       e.preventDefault();
@@ -552,11 +695,11 @@ export function ExplorerScreen() {
                   }}
                   title={
                     c.kind === "folder"
-                      ? "Cliquer : entrer dans le dossier — clic droit : créer dedans"
-                      : "Cliquer : ouvrir le canvas — glissez des fichiers ici"
+                      ? "Cliquer : entrer dans le dossier — clic droit : créer dedans — glissez un tableau ici pour le ranger"
+                      : "Cliquer : ouvrir le canvas — glissez des fichiers ici, ou un tableau pour le ranger dans celui-ci"
                   }
                 >
-                  <div className="absolute right-2 top-2 hidden gap-0.5 group-hover:flex">
+                  <div className="absolute right-2 top-2 hidden gap-0.5 group-hover:flex group-focus-within:flex">
                     {/* créer DEDANS : chaque carte l'offre (v1.6.3 — un canvas
                         aussi range) ; le clic droit dit la même chose */}
                     {c.kind === "folder" ? (
@@ -591,7 +734,7 @@ export function ExplorerScreen() {
                         size="icon"
                         variant="ghost"
                         className="size-7 bg-card"
-                        title="Créer un sous-tableau dans ce canvas"
+                        title="Créer un sous-dossier dans ce canvas"
                         onClick={(e) => {
                           e.stopPropagation();
                           openNew("folder", c.id);
@@ -684,27 +827,17 @@ export function ExplorerScreen() {
                   {dropOn === c.id && (
                     <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-xl bg-background/70">
                       <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
-                        <Upload className="size-4" /> Déposer dans « {c.label} »
+                    {c.kind === "folder" ? (
+                      <FolderInput className="size-4" />
+                    ) : (
+                      <Upload className="size-4" />
+                    )}
+                    Ranger dans « {c.label} »
                       </span>
                     </div>
                   )}
                 </div>
               ))}
-              {/* les DEUX créations du niveau visité (v1.6.2 : le cœur de la
-                  demande) — canvas et dossier côte à côte, comme « Nouveau
-                  dossier » et « Nouveau document » d'un explorateur de fichiers */}
-              <button
-                className="flex min-h-[128px] items-center justify-center gap-2 rounded-xl border-[1.5px] border-dashed border-border text-sm text-muted-foreground hover:border-foreground hover:text-foreground"
-                onClick={() => openNew("canvas", browseInId)}
-              >
-                <Presentation className="size-4" /> Nouveau canvas
-              </button>
-              <button
-                className="flex min-h-[128px] items-center justify-center gap-2 rounded-xl border-[1.5px] border-dashed border-border text-sm text-muted-foreground hover:border-foreground hover:text-foreground"
-                onClick={() => openNew("folder", browseInId)}
-              >
-                <FolderPlus className="size-4" /> Nouveau dossier
-              </button>
             </div>
 
             {snap.recent.length > 0 && (
@@ -734,11 +867,13 @@ export function ExplorerScreen() {
         ) : (
           <>
             <div className="mb-4 flex items-center gap-3">
-              {/* « Tableaux » referme le plan et rend le niveau visité : si on
-                  avait ouvert un canvas DANS un dossier, on retourne à CE dossier
-                  (le fil d'Ariane reste) — pas un saut brutal à la racine */}
+              {/* Le retour rend le niveau **visité** : si on avait ouvert un
+                  canvas DANS un dossier, on retourne à CE dossier (le chemin
+                  reste) — pas un saut brutal à la racine. Le libellé suit la
+                  nature du niveau : un canvas-conteneur n'est pas un dossier,
+                  l'appeler « Dossier » mentait. */}
               <Button size="sm" variant="outline" onClick={() => setOpenCanvasId(null)}>
-                <ArrowLeft className="mr-1 size-4" /> {browseIn ? "Dossier" : "Tableaux"}
+                <ArrowLeft className="mr-1 size-4" /> {browseIn ? browseIn.label : "Tableaux"}
               </Button>
               <h1 className="text-xl font-semibold tracking-tight">
                 {open.label}
@@ -828,10 +963,12 @@ export function ExplorerScreen() {
           x={menu.x}
           y={menu.y}
           target={menu.target}
-          /* la vérité du menu de fond (v1.6.3-bis) : en vue plan, « ici » c'est
-             LE canvas ouvert — l'erreur signalée (« dans /Atelier, ça créait à
-             la racine ») venait de ce ciblage manquant */
-          hereLabel={open?.label}
+          /* la vérité du menu de fond : en vue plan, « ici » c'est LE canvas
+             ouvert ; en vue grille, c'est le niveau visité (dossier compris).
+             L'erreur signalée (« dans /Atelier, ça créait à la racine ») venait
+             de ce ciblage manquant — et l'erreur inverse (« Créer ici » sans rien
+             dire) laissait deviner où l'on landed. */
+          hereLabel={open?.label ?? browseIn?.label}
           targetChildCount={
             menu.target ? canvases.filter((c) => c.parent_id === menu.target?.id).length : 0
           }
@@ -839,9 +976,9 @@ export function ExplorerScreen() {
           onNew={(kind, parentId) => {
             setMenu(null);
             // « ici » se résout dans l'ordre : sur une carte → son id ; en vue
-            // plan → le canvas ouvert ; dans un dossier visité → ce dossier ;
+            // plan → le canvas ouvert ; dans un niveau visité → ce niveau ;
             // à la racine → la racine. Jamais la racine par accident.
-            openNew(kind, parentId ?? open?.id ?? browseInId);
+            openNew(kind, parentId ?? open?.id ?? levelId);
           }}
           onUpload={() => {
             const t = menu.target;
@@ -902,7 +1039,8 @@ export function ExplorerScreen() {
           setNewParentId(null);
         }}
         parentId={newParentId}
-        onCreated={(id) => {
+        destination={newDestination}
+        onCreated={(id, label) => {
           setNewOpen(false);
           setNewParentId(null);
           // La nature du créé est **la prop `kind` de la modale** — jamais une
@@ -910,19 +1048,23 @@ export function ExplorerScreen() {
           // rendu précédent (le snapshot rechargé n'a pas encore re-rendu), il
           // ne contient pas l'entrée neuve et la devinette tombait sur `undefined`
           // → un dossier créé se retrouvait « ouvert » comme un plan vide.
+          const where = newParentId
+            ? `« ${canvases.find((c) => c.id === newParentId)?.label ?? "?"} »`
+            : "la racine";
+          setOpenCanvasId(null);
+          setSel(null);
           if (newKind === "folder") {
-            // un dossier vient de naître : on **entre dedans** (c'est son usage —
-            // le voir et le remplir), jamais son « plan » qui n'existe pas
+            // Un dossier vient de naître : on **entre dedans** — c'est son usage
+            // (le voir et le remplir). Jamais « son plan », qui n'existe pas.
             setBrowseInId(id);
-            setOpenCanvasId(null);
-            setSel(null);
           } else {
-            // un canvas vient de naître : on ouvre **son plan** — ou, s'il a été
-            // créé dans un dossier, on entre dans le dossier pour le voir dedans
+            // Un canvas vient de naître : **on reste dans le niveau où on l'a
+            // créé**, sa carte y est visible. L'ancien écran ouvrait le plan du
+            // canvas neuve — vide, sans frame, sans objet — et faisait perdre le
+            // dossier d'où l'on venait ; c'était un aller-retour pour rien.
             setBrowseInId(newParentId);
-            setOpenCanvasId(id);
-            setSel(null);
           }
+          setNotice(`« ${label} » créé dans ${where}.`);
         }}
         refresh={refresh}
       />
@@ -1088,7 +1230,7 @@ function ContextMenu({
       {target === null ? (
         <>
           <p className="px-2.5 pt-1.5 pb-1 text-[11px] uppercase tracking-wider text-muted-foreground">
-            {hereLabel ? `Créer dans « ${hereLabel} »` : "Créer ici"}
+            {hereLabel ? `Créer dans « ${hereLabel} »` : "Créer à la racine"}
           </p>
           <button className={item} onClick={() => onNew("canvas", null)}>
             <Presentation className="size-3.5" /> Nouveau canvas ici
@@ -1613,6 +1755,10 @@ function NewCanvasModal({
   onCreated,
   /** Le dossier dans lequel créer (sous-élément) — null ou absent : à la racine. */
   parentId,
+  /** Le chemin lisible de cette destination (« la racine », « « Atelier » », …) :
+   *  la modale **dit** où elle va créer, au lieu de supposer « le dossier
+   *  visité » — qui est faux dès qu'on passe par le clic droit sur une carte. */
+  destination,
   /** Le rechargement du snapshot après création (l'écran reste la vérité de la base). */
   refresh,
 }: {
@@ -1620,8 +1766,9 @@ function NewCanvasModal({
   /** Ce qu'on crée : un canvas (surface) ou un dossier (conteneur) — v1.6.2. */
   kind: "canvas" | "folder";
   onClose: () => void;
-  onCreated: (id: string) => void;
+  onCreated: (id: string, label: string) => void;
   parentId?: string | null;
+  destination: string;
   refresh: () => Promise<void>;
 }) {
   const [label, setLabel] = useState("");
@@ -1642,9 +1789,10 @@ function NewCanvasModal({
     setBusy(false);
     if (res.ok) {
       const row = (await res.json()) as { id: string };
+      const created = label.trim();
       setLabel("");
       await refresh();
-      onCreated(row.id);
+      onCreated(row.id, created);
     } else {
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       setError(body.error ?? `échec (${res.status})`);
@@ -1653,7 +1801,12 @@ function NewCanvasModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30" onClick={onClose}>
       <div className="w-[420px] rounded-xl border border-border bg-card p-5 shadow-lg" onClick={(e) => e.stopPropagation()}>
-        <p className="text-sm font-semibold">Nouveau {noun}{parentId ? " (dans le dossier visité)" : ""}</p>
+        <p className="text-sm font-semibold">Nouveau {noun}</p>
+        {/* La destination, en toutes lettres : c'est la question que l'on se pose
+            devant une modale de création (« ça va atterrir où ? »). */}
+        <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+          <FolderInput className="size-3.5 shrink-0" /> dans {destination}
+        </p>
         {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
         <label className="mt-3 block text-xs text-muted-foreground" htmlFor="new-canvas-label">Nom</label>
         <Input
