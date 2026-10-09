@@ -28,6 +28,14 @@ L'application écoute sur <http://localhost:3000>. La base SQLite est **créée 
 automatiquement au démarrage** : `instrumentation.ts` applique les migrations de
 `migrations/` puis démarre le worker de jobs. Aucune étape de setup manuelle.
 
+> **Correlo ne s'héberge pas.** La base est un fichier SQLite, et l'ingestion, la
+découverte et les synthèses tournent dans le worker du serveur : il faut un disque
+persistant inscriptible **et** un process qui vit. Un hébergeur serverless échoue sur
+les deux — et un déploiement qui réussirait serait une app vide, le corpus étant local
+et ignoré par git. C'est le sens de « local-first » : le corpus ne quitte pas le
+disque ; ce qui sort de la machine est seulement ce que vous configurez
+(`LLM_CHAT_PROVIDER`, `SEARCH_PROVIDER`).
+
 ## Écrans
 
 | Route | Rôle |
