@@ -18,12 +18,10 @@
  *     et le claim peut nommer une forme absente de l'un des fragments.
  *
  * **Ce module est la source unique** : la barrière serveur
- * (`lib/discover/claim-rules.ts`, branchée dans `discovery-service`) et
- * l'évaluateur (`scripts/lib/measure-2a.mjs`, protocole Q22) appellent les mêmes
- * fonctions — sinon la barrière ne filtrerait pas ce que la mesure compte. Il est
- * volontairement **sans import** : le script d'évaluation est du JavaScript nu
- * exécuté par Node (pas de bundler, pas d'alias `@/`), il ne peut charger que ce
- * module tel quel.
+ * (`lib/discover/claim-rules.ts`, branchée dans `discovery-service`) et les
+ * services qui mesurent la nouveauté d'une connexion appellent les mêmes
+ * fonctions — sinon la barrière ne filtrerait pas ce que la mesure compte.
+ * Il reste volontairement **sans import** : testable et chargeable tel quel.
  */
 
 /** Longueur du préfixe servant de racine approximative (« recommandation »/« recommande »). */

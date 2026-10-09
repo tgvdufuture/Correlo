@@ -27,6 +27,11 @@
 # identifiants locaux de l'outillage
 /.freebuff/
 
+# fichiers d'agent (AGENTS.md est regenere par `next dev` a chaque lancement)
+/AGENTS.md
+/CLAUDE.md
+/.agents/
+
 # debug
 npm-debug.log*
 yarn-debug.log*
