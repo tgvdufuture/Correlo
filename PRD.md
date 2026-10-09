@@ -1,4 +1,4 @@
-PRD — Sérendipité (moteur de connexions personnel)
+PRD — Correlo (moteur de connexions personnel)
 
 Version : 1.2 · Date : 2026-09-10 · Statut : Locked — décisions Q1–Q24 intégrées · Remplace v1.1 · Amendé v1.3 (Synthèses & Conversation) : voir PRD-v1.3-amendement.md
 0. Executive Summary
@@ -439,7 +439,7 @@ app/sources UI → tests (chunker, embedding-codec, ingestion integration, crash
 recovery, expired lease, UTF-16 offsets) → README (Ollama install, env vars,
 validation steps, local-first statement).
 
-Env vars: DATABASE_PATH=./data/serendipity.db, LLM_CHAT_PROVIDER=groq,
+Env vars: DATABASE_PATH=./data/correlo.db, LLM_CHAT_PROVIDER=groq,
 GROQ_API_KEY (required only if provider=groq), GROQ_CHAT_MODEL=llama-3.3-70b-versatile,
 OLLAMA_BASE_URL=http://localhost:11434, OLLAMA_EMBED_MODEL=nomic-embed-text,
 OLLAMA_CHAT_MODEL (required only if provider=ollama).

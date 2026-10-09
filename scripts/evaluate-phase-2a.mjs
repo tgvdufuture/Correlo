@@ -2,7 +2,7 @@
 /**
  * Évaluation Phase 2A (protocole Q22, PRD §4) :
  *   node scripts/evaluate-phase-2a.mjs [--runs=run-a,run-b] [--manifest=data/corpus_manifest.json]
- *     [--db=./data/serendipity.db] [--eval-dir=data/eval]
+ *     [--db=./data/correlo.db] [--eval-dir=data/eval]
  *
  * 1. Génère data/eval/rapport_evaluation.md : chaque suggestion avec claim,
  *    relation_type, tier, statut épistémique, sources + domaines (manifeste),
@@ -40,7 +40,7 @@ const args = Object.fromEntries(
     return m ? [m[1], m[2]] : [a.replace(/^--/, ""), true];
   })
 );
-const dbPath = args.db ?? "./data/serendipity.db";
+const dbPath = args.db ?? "./data/correlo.db";
 const manifestPath = args.manifest ?? "./data/corpus_manifest.json";
 const evalDir = args["eval-dir"] ?? "./data/eval";
 const runFilter = args.runs ? String(args.runs).split(",") : null;

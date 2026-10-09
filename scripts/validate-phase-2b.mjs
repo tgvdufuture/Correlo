@@ -28,7 +28,7 @@ import { createHash } from "node:crypto";
 
 const args = process.argv.slice(2).filter((a) => a.startsWith("--"));
 const positional = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-const dbPath = positional[0] ?? "./data/serendipity.db";
+const dbPath = positional[0] ?? "./data/correlo.db";
 const runOnly = args.find((a) => a.startsWith("--run="))?.slice("--run=".length) ?? null;
 
 const sha256 = (s) => createHash("sha256").update(s, "utf8").digest("hex");

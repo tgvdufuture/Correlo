@@ -35,7 +35,7 @@ import {
   judgeConclusion,
 } from "../lib/quality/conclusion.ts";
 
-const dbPath = process.argv[2] ?? "./data/serendipity.db";
+const dbPath = process.argv[2] ?? "./data/correlo.db";
 if (!fs.existsSync(dbPath)) {
   console.error(`Base introuvable : ${dbPath}`);
   process.exit(1);

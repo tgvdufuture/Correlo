@@ -4,7 +4,7 @@
  *   node scripts/synthesize.mjs [--manifest=data/corpus_manifest.json]
  *     [--run-id=...] [--max-seeds=12]
  *     [--baseline]                 contrôle « résumé » (n'écrit rien en base)
- *     [--wait=900] [--db=./data/serendipity.db]
+ *     [--wait=900] [--db=./data/correlo.db]
  *
  * Le job est exécuté par le worker du serveur (npm run dev) ; le CLI suit la
  * progression (progress_json) et produit le rapport + data/synthesis_runs.json.
@@ -26,7 +26,7 @@ const args = Object.fromEntries(
   })
 );
 
-const dbPath = args.db ?? "./data/serendipity.db";
+const dbPath = args.db ?? "./data/correlo.db";
 const manifestPath = args.manifest ?? "./data/corpus_manifest.json";
 const mode = args.baseline ? "baseline" : "synthesis";
 const runId = args["run-id"] ?? `synth-${mode}-${Date.now().toString(36)}`;

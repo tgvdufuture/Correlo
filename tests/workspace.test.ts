@@ -21,7 +21,7 @@ import {
 const dirs: string[] = [];
 
 function tmpRoot(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "serendipity-ws-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "correlo-ws-"));
   dirs.push(dir);
   return dir;
 }

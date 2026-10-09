@@ -11,7 +11,7 @@ import { encodeEmbedding } from "@/lib/llm/embedding-codec";
 import { sha256Hex } from "@/lib/hash";
 
 export function makeTestDb(): { db: Db; dir: string } {
-  const dir = mkdtempSync(path.join(tmpdir(), "serendipity-test-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "correlo-test-"));
   return { db: createDb(path.join(dir, "test.db")), dir };
 }
 

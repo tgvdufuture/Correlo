@@ -4,7 +4,7 @@ import { AppSidebar } from "@/components/app-sidebar";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Sérendipité",
+  title: "Correlo",
   description: "Moteur de connexions personnel, local-first",
 };
 

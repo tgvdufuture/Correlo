@@ -4,7 +4,7 @@
  * + ré-ingestion de la source ; les Suggestions disparaissent en CASCADE, les
  * Constructions survivent via provenance_snapshot et passent stale = 1 ».
  *
- *   node scripts/reingest.mjs [--sources=gutenberg|all|<id,id...>] [--db=./data/serendipity.db]
+ *   node scripts/reingest.mjs [--sources=gutenberg|all|<id,id...>] [--db=./data/correlo.db]
  *     [--wait=1800]
  *
  * `gutenberg` (défaut) cible les sources URL dont le texte stocké porte encore le
@@ -24,7 +24,7 @@ const args = Object.fromEntries(
   })
 );
 
-const dbPath = args.db ?? "./data/serendipity.db";
+const dbPath = args.db ?? "./data/correlo.db";
 const selector = String(args.sources ?? "gutenberg");
 const waitSeconds = Number(args.wait ?? 1800);
 // Doit suivre CHUNKER_VERSION (lib/ingest/chunker.ts) : c'est lui qui invalide la

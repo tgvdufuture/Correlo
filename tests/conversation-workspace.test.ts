@@ -44,7 +44,7 @@ afterEach(() => {
 
 /** Racine jetable contenant `notes.md` (4 lignes) — la copie citée en dépend. */
 function makeRoot(): { root: string; notes: string } {
-  const root = tmpDir("serendipity-ws-conv-");
+  const root = tmpDir("correlo-ws-conv-");
   const notes = path.join(root, "notes.md");
   fs.writeFileSync(notes, NOTES);
   return { root, notes };
@@ -356,7 +356,7 @@ describe("read_file — exposition et facturation", () => {
 
   it("une lecture refusée par le confinement est tracée, lisible, et non facturée", async () => {
     const { db } = corpus();
-    const base = tmpDir("serendipity-ws-esc-");
+    const base = tmpDir("correlo-ws-esc-");
     const root = path.join(base, "racine");
     fs.mkdirSync(root);
     fs.writeFileSync(path.join(root, "notes.md"), NOTES);

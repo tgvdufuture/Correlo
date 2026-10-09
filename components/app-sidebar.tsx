@@ -117,7 +117,7 @@ export function AppSidebar() {
         <span className="flex size-7 items-center justify-center rounded-lg bg-primary text-primary-foreground">
           <SparkleMark />
         </span>
-        <span className="text-sm font-semibold tracking-tight">Sérendipité</span>
+        <span className="text-sm font-semibold tracking-tight">Correlo</span>
       </Link>
 
       <nav className="space-y-0.5 text-sm" aria-label="Navigation principale">
@@ -262,7 +262,7 @@ function ThemeToggle() {
   );
 }
 
-/** Le piquet de la marque : une étincelle (sérendipité) dessinée, pas une émoji. */
+/** Le piquet de la marque : une étincelle dessinée, pas une émoji. */
 function SparkleMark() {
   return (
     <svg viewBox="0 0 24 24" className="size-4" fill="currentColor" aria-hidden>

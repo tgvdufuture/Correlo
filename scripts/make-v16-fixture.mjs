@@ -6,7 +6,7 @@
  *
  * Pourquoi ce script existe : les checks `browser-check-explorer.mjs` et
  * `browser-check-explorer-nested.mjs` **écrivent** (création, déplacement,
- * suppression, dépôt de fichier). Les lancer sur `data/serendipity.db`
+ * suppression, dépôt de fichier). Les lancer sur `data/correlo.db`
  * toucherait la base réelle. Or la fixture était jusqu'ici VACUUM-ée « à la
  * main », sans script — les checks étaient donc **injouables** pour quiconque
  * n'était pas l'auteur de la v1.6.
@@ -32,7 +32,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
-const SRC = "data/serendipity.db";
+const SRC = "data/correlo.db";
 const OUT = "data/eval/v16-check.db";
 
 if (!fs.existsSync(SRC)) {

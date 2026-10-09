@@ -3,7 +3,7 @@
  * Re-vectorisation du corpus dans l'espace **actif** — la bascule de connecteur
  * d'embeddings (Ollama ↔ API) sans laisser deux espaces incomparables en base.
  *
- *   node scripts/reembed.mjs [--db=./data/serendipity.db] [--env=.env.local]
+ *   node scripts/reembed.mjs [--db=./data/correlo.db] [--env=.env.local]
  *     [--sources=<id,id...>] [--batch-size=32] [--force] [--dry-run] [--wait=3600]
  *
  * Le travail est exécuté par le worker du serveur (`npm run dev`) : le script enfile
@@ -46,7 +46,7 @@ if (args.db) process.env.DATABASE_PATH = String(args.db);
 const { getEmbeddingSpace } = await import("../lib/llm/active-space.ts");
 const { listCorpusSpaces, sameSpace, spaceLabel } = await import("../lib/llm/embedding-space.ts");
 
-const dbPath = String(args.db ?? process.env.DATABASE_PATH ?? "./data/serendipity.db");
+const dbPath = String(args.db ?? process.env.DATABASE_PATH ?? "./data/correlo.db");
 const batchSize = Number(args["batch-size"] ?? process.env.NVIDIA_EMBED_BATCH_SIZE ?? 32);
 const waitSeconds = Number(args.wait ?? 3600);
 const force = args.force === true;

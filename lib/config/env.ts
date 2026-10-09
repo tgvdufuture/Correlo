@@ -7,7 +7,7 @@ import { z } from "zod";
  */
 const envSchema = z
   .object({
-    DATABASE_PATH: z.string().min(1).default("./data/serendipity.db"),
+    DATABASE_PATH: z.string().min(1).default("./data/correlo.db"),
     LLM_CHAT_PROVIDER: z.enum(["groq", "ollama"]).default("groq"),
     GROQ_API_KEY: z.string().optional(),
     /** Endpoint chat OpenAI-compatible (Groq par défaut ; tout serveur compatible accepté). */

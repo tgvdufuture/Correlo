@@ -134,7 +134,7 @@ export async function extractUrlText(
     res = await fetch(url, {
       signal: ctrl.signal,
       redirect: "follow",
-      headers: { "User-Agent": "Mozilla/5.0 (app locale Sérendipité)" },
+      headers: { "User-Agent": "Mozilla/5.0 (app locale Correlo)" },
     });
     if (!res.ok) {
       throw new UrlExtractionError("fetch_failed", `HTTP ${res.status} pour ${url}`);

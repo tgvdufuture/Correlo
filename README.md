@@ -1,4 +1,4 @@
-# Sérendipité — moteur de connexions personnel
+# Correlo — moteur de connexions personnel
 
 Application web locale (Next.js) où vous déposez des sources (texte, PDF, URL).
 Le système les découpe en fragments (~2 000 caractères), les indexe par embeddings
@@ -55,7 +55,7 @@ npm run dev                  # http://localhost:3000/ (l'atelier)
 
 | Variable | Défaut | Description |
 |---|---|---|
-| `DATABASE_PATH` | `./data/serendipity.db` | Base SQLite locale |
+| `DATABASE_PATH` | `./data/correlo.db` | Base SQLite locale |
 | `LLM_CHAT_PROVIDER` | `groq` | `groq` ou `ollama` — aucun fallback automatique |
 | `GROQ_API_KEY` | — | Requise uniquement si `LLM_CHAT_PROVIDER=groq` |
 | `GROQ_CHAT_MODEL` | `qwen/qwen3.8-27b` | Modèle de chat Groq (le défaut historique `llama-3.3-70b-versatile` n'existe plus chez Groq) |
@@ -326,3 +326,7 @@ document referme ses conteneurs, un texte qui en parle n'ouvre rien.
   **texte des fragments** envoyé au service d'embeddings choisi.
 - Les fichiers d'origine sont copiés dans `data/sources/` (gitignoré).
 - Le résumé de source est un routage non citable : seuls les fragments sont citables.
+
+## Licence
+
+MIT — voir [LICENSE](LICENSE).

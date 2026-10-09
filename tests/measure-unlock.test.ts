@@ -33,7 +33,7 @@ import { contentWords, stemOf } from "@/lib/quality/lexical-anchor";
  *
  *     MEASURE_UNLOCK=1 npx vitest run tests/measure-unlock.test.ts
  */
-const DB = process.env.DATABASE_PATH ?? "data/serendipity.db";
+const DB = process.env.DATABASE_PATH ?? "data/correlo.db";
 const measure = process.env.MEASURE_UNLOCK === "1";
 
 const QUESTIONS = [

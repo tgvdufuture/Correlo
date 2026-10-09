@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Évaluation Phase 5A (protocole Q25, amendement v1.3 §2.3) :
- *   node scripts/evaluate-phase-5a.mjs [--runs=run-a,run-b] [--db=./data/serendipity.db]
+ *   node scripts/evaluate-phase-5a.mjs [--runs=run-a,run-b] [--db=./data/correlo.db]
  *     [--eval-dir=data/eval] [--baseline=data/baseline_5a.json] [--auto]
  *
  * 1. Vérifie PROGRAMMATIQUEMENT chaque preuve citée (fragment existant, texte
@@ -25,7 +25,7 @@ const args = Object.fromEntries(
     return m ? [m[1], m[2]] : [a.replace(/^--/, ""), true];
   })
 );
-const dbPath = args.db ?? "./data/serendipity.db";
+const dbPath = args.db ?? "./data/correlo.db";
 const evalDir = args["eval-dir"] ?? "./data/eval";
 const baselinePath = args.baseline ?? "./data/baseline_5a.json";
 const runFilter = args.runs ? String(args.runs).split(",") : null;

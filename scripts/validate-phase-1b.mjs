@@ -11,7 +11,7 @@
 import Database from "better-sqlite3";
 import fs from "node:fs";
 
-const dbPath = process.argv[2] ?? "./data/serendipity.db";
+const dbPath = process.argv[2] ?? "./data/correlo.db";
 const manifestPath = process.argv[3] ?? "./data/corpus_manifest.json";
 
 if (!fs.existsSync(manifestPath)) {

@@ -287,7 +287,7 @@ export async function fetchGuarded(
           redirect: "manual",
           signal: ctrl.signal,
           headers: {
-            "User-Agent": "Mozilla/5.0 (app locale Sérendipité)",
+            "User-Agent": "Mozilla/5.0 (app locale Correlo)",
             Accept: "text/html,application/xhtml+xml,text/plain;q=0.9",
           },
         });

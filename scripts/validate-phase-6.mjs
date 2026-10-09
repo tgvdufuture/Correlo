@@ -105,7 +105,7 @@ const dbArg = args.find((a) => !a.startsWith("--"));
 const wsArg = args.find((a) => a.startsWith("--workspace="));
 const wsOverride = wsArg ? wsArg.slice("--workspace=".length) : null;
 
-const dbPath = dbArg ?? "./data/serendipity.db";
+const dbPath = dbArg ?? "./data/correlo.db";
 if (!fs.existsSync(dbPath)) {
   console.error(`Base introuvable : ${dbPath}`);
   process.exit(1);

@@ -3,7 +3,7 @@
  * CLI Phase 2A — PoC découverte (SANS UI) :
  *   node scripts/discover.mjs [--manifest=data/corpus_manifest.json]
  *     [--run-id=...] [--sampler=diversified|top6] [--max-pairs=200]
- *     [--max-pairs-per-source=20] [--batch-size=10] [--wait=600] [--db=./data/serendipity.db]
+ *     [--max-pairs-per-source=20] [--batch-size=10] [--wait=600] [--db=./data/correlo.db]
  *     [--focus=id1,id2]   # sources examinées en premier (dépôt d'un fichier)
  *     [--seed=hex]        # rejoue la sélection d'un run archivé (comparaison)
  *     [--resume]          # relance un run interrompu depuis son checkpoint
@@ -39,7 +39,7 @@ const args = Object.fromEntries(
   })
 );
 
-const dbPath = args.db ?? "./data/serendipity.db";
+const dbPath = args.db ?? "./data/correlo.db";
 const manifestPath = args.manifest ?? "./data/corpus_manifest.json";
 const sampler = args.sampler === "top6" ? "top6" : "diversified";
 const runId = args["run-id"] ?? `run-${sampler}-${Date.now().toString(36)}`;
