@@ -1,104 +1,103 @@
 # Correlo
 
-Moteur de connexions personnel, **local-first**. Correlo ingère vos documents, les découpe
-en fragments, les vectorise, puis cherche des **rapprochements non évidents** entre eux —
-ceux qu'une recherche par mots-clés ne trouverait pas. Chaque piste est proposée, jamais
-imposée : vous l'acceptez, la rejetez, ou l'approfondissez en conversation.
+A personal, **local-first** connection engine. Correlo takes your documents, splits them
+into fragments, embeds them, and then looks for the **non-obvious links** between them —
+the ones a keyword search would never surface. Every lead is offered, never imposed: you
+accept it, reject it, or dig into it in conversation.
 
-Une connexion qui ne tient qu'à un mot rare partagé, ou à deux fragments du même document,
-est écartée par une barrière explicite (`lib/discover/claim-rules.ts`) : le moteur ne
-présente pas comme une découverte ce qui était déjà trouvable.
+A link that rests only on a shared rare word, or on two fragments of the same document, is
+ruled out by an explicit filter (`lib/discover/claim-rules.ts`): the engine never presents
+as a discovery what was already findable.
 
-## Prérequis
+## Requirements
 
 - **Node.js 20+** (Next.js 16).
-- Des embeddings : **Ollama** en local avec `nomic-embed-text` (défaut), ou un endpoint
-  OpenAI-compatible via `EMBED_PROVIDER=api`.
-- Un modèle de chat : **Groq** par défaut (`GROQ_API_KEY`), ou Ollama en local.
+- Embeddings: **Ollama** running locally with `nomic-embed-text` (the default), or any
+  OpenAI-compatible endpoint via `EMBED_PROVIDER=api`.
+- A chat model: **Groq** by default (`GROQ_API_KEY`), or Ollama locally.
 
-## Démarrage
+## Getting started
 
 ```bash
 npm install
-cp .env.example .env.local   # renseigner au minimum GROQ_API_KEY
+cp .env.example .env.local   # fill in GROQ_API_KEY at minimum
 npm run dev
 ```
 
-L'application écoute sur <http://localhost:3000>. La base SQLite est **créée et migrée
-automatiquement au démarrage** : `instrumentation.ts` applique les migrations de
-`migrations/` puis démarre le worker de jobs. Aucune étape de setup manuelle.
+The app listens on <http://localhost:3000>. The SQLite database is **created and migrated
+automatically on startup**: `instrumentation.ts` applies everything in `migrations/` and
+then starts the job worker. No manual setup step.
 
-> **Correlo ne s'héberge pas.** La base est un fichier SQLite, et l'ingestion, la
-découverte et les synthèses tournent dans le worker du serveur : il faut un disque
-persistant inscriptible **et** un process qui vit. Un hébergeur serverless échoue sur
-les deux — et un déploiement qui réussirait serait une app vide, le corpus étant local
-et ignoré par git. C'est le sens de « local-first » : le corpus ne quitte pas le
-disque ; ce qui sort de la machine est seulement ce que vous configurez
-(`LLM_CHAT_PROVIDER`, `SEARCH_PROVIDER`).
+> **Correlo cannot be hosted.** The database is a SQLite file, and ingestion, discovery and
+> synthesis all run inside the server's own worker: it needs a writable persistent disk
+> **and** a process that stays alive. A serverless host provides neither — and a deployment
+> that did succeed would be an empty app anyway, since the corpus is local and git-ignored.
+> That is what "local-first" means here: the corpus never leaves the disk, and the only
+> things that go out are the ones you configure (`LLM_CHAT_PROVIDER`, `SEARCH_PROVIDER`).
 
-## Écrans
+## Screens
 
-| Route | Rôle |
+| Route | Purpose |
 | --- | --- |
-| `/` | L'explorateur de tableaux — l'accueil. On ouvre l'app sur ses tableaux, pas sur un document |
-| `/canvas/<id>` | L'atelier d'un tableau : dépôt de fichiers, suggestions, aperçu (`/canvas` y mène) |
-| `/conversation` | Conversation sur le corpus ; c'est là que les connexions se discutent |
-| `/sources` | Les documents ingérés et l'état de leur traitement |
-| `/suggestions` | Les connexions découvertes, à accepter ou rejeter |
-| `/syntheses` | Les synthèses produites sur un thème |
+| `/` | The board explorer — the home screen. The app opens on your boards, not on a document |
+| `/canvas/<id>` | The workshop for one board: drop files, review suggestions, preview (`/canvas` leads there) |
+| `/conversation` | Conversation over the corpus; this is where connections get argued about |
+| `/sources` | The documents ingested, and the state of their processing |
+| `/suggestions` | The connections found, to accept or reject |
+| `/syntheses` | The syntheses produced around a theme |
 
 ## Configuration
 
-Tout est documenté dans `.env.example`. Les réglages qui changent le comportement :
+Everything is documented in `.env.example`. The settings that change behaviour:
 
-| Variable | Défaut | Effet |
+| Variable | Default | Effect |
 | --- | --- | --- |
-| `DATABASE_PATH` | `./data/correlo.db` | Base SQLite locale. C'est le corpus entier : la sauvegarder, c'est sauvegarder le travail |
-| `LLM_CHAT_PROVIDER` | `groq` | `groq` ou `ollama`. **Aucun repli automatique** entre les deux |
-| `GROQ_API_KEY` | — | Requise quand `LLM_CHAT_PROVIDER=groq` |
-| `EMBED_PROVIDER` | `ollama` | `ollama` (local, 768 dims) ou `api` (2048 dims) |
-| `NVIDIA_API_KEY` | — | Requise quand `EMBED_PROVIDER=api` sur `integrate.api.nvidia.com` |
-| `SEARCH_PROVIDER` | `none` | `exa` active la recherche web de l'agent. `none` ⇒ les outils web **n'existent pas** |
-| `WORKSPACE_ROOT` | vide | Dossier local que l'agent a le droit de **lire**, en lecture seule. Vide ⇒ l'outil n'existe pas |
+| `DATABASE_PATH` | `./data/correlo.db` | Local SQLite database. This *is* the whole corpus: backing it up is backing up the work |
+| `LLM_CHAT_PROVIDER` | `groq` | `groq` or `ollama`. **No automatic fallback** between the two |
+| `GROQ_API_KEY` | — | Required when `LLM_CHAT_PROVIDER=groq` |
+| `EMBED_PROVIDER` | `ollama` | `ollama` (local, 768 dims) or `api` (2048 dims) |
+| `NVIDIA_API_KEY` | — | Required when `EMBED_PROVIDER=api` on `integrate.api.nvidia.com` |
+| `SEARCH_PROVIDER` | `none` | `exa` turns on the agent's web search. `none` ⇒ the web tools **do not exist** |
+| `WORKSPACE_ROOT` | empty | Local directory the agent may **read**, read-only. Empty ⇒ the tool does not exist |
 
-> **Changer `EMBED_PROVIDER` rebascule l'espace vectoriel.** Un vecteur n'a de sens que
-> dans l'espace qui l'a produit : après un changement, lancer `npm run reembed` (`--dry-run`
-> pour voir d'abord). Tant que le corpus n'est pas aligné, l'analyse refuse de comparer
-> deux espaces au lieu de produire des liens faux.
+> **Changing `EMBED_PROVIDER` switches the embedding space.** A vector only means something
+> in the space that produced it: after a change, run `npm run reembed` (`--dry-run` to look
+> first). Until the corpus is aligned, the analysis refuses to compare two spaces rather
+> than produce false links.
 
-Les identifiants sont lus depuis `.env.local`, jamais committé.
+Credentials are read from `.env.local`, which is never committed.
 
-## Commandes
+## Commands
 
 ```bash
-npm run dev         # serveur de développement (migrations + worker)
-npm run build       # build de production
-npm run start       # serveur de production
+npm run dev         # development server (migrations + worker)
+npm run build       # production build
+npm run start       # production server
 npm run lint        # ESLint
 npm run typecheck   # tsc --noEmit
 ```
 
-Longs travaux sur le corpus — **le serveur doit tourner** (`npm run dev`), car c'est son
-worker qui exécute les jobs ; ces scripts se contentent d'enfiler et de suivre :
+Long-running corpus work — **the server must be running** (`npm run dev`), because its
+worker is what executes the jobs; these scripts only enqueue one and follow along:
 
 ```bash
-npm run discover    # un run de découverte (chemins, options : --help dans scripts/discover.mjs)
-npm run reingest    # ré-ingérer des sources (changement de découpage)
-npm run reembed     # re-vectoriser le corpus dans l'espace actif
-npm run synth       # produire des synthèses
+npm run discover    # a discovery run (paths and options: --help in scripts/discover.mjs)
+npm run reingest    # re-ingest sources (after a chunking change)
+npm run reembed     # re-embed the corpus into the active space
+npm run synth       # produce syntheses
 ```
 
-## Structure
+## Layout
 
 ```
-app/          routes (pages) et API
-components/   interface (explorateur, atelier, conversation)
-lib/          le moteur : ingestion, embeddings, découverte, jobs, conversation
-migrations/   schéma SQLite, appliqué au démarrage
-scripts/      CLI de travaux longs
-data/         base SQLite locale (ignorée par git)
+app/          routes (pages) and API
+components/   interface (explorer, workshop, conversation)
+lib/          the engine: ingestion, embeddings, discovery, jobs, conversation
+migrations/   SQLite schema, applied on startup
+scripts/      CLIs for long-running work
+data/         local SQLite database (git-ignored)
 ```
 
-## Licence
+## License
 
-MIT — voir [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
