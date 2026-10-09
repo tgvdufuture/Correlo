@@ -9,6 +9,11 @@ A link that rests only on a shared rare word, or on two fragments of the same do
 ruled out by an explicit filter (`lib/discover/claim-rules.ts`): the engine never presents
 as a discovery what was already findable.
 
+![The Correlo explorer: three boards, each with its frame and object count](docs/explorer.png)
+
+*The explorer is the home screen: your boards, what each one holds, and what you touched
+last. The interface is in French.*
+
 ## Requirements
 
 - **Node.js 20+** (Next.js 16).
